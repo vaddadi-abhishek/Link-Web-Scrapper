@@ -7,11 +7,22 @@ export const youtubeExtractor: PlatformExtractor = {
   async extract(targetUrl: string): Promise<ExtractionResult> {
     const cheerioData = await scrapeWithCheerio(targetUrl);
 
-    const title = cheerioData?.title || null;
-    const description = cheerioData?.description || null;
-    const image = cheerioData?.image || null;
+    let title = cheerioData?.title || null;
+    let description = cheerioData?.description || null;
+    let image = cheerioData?.image || null;
     const logo = cheerioData?.logo || resolveUrl('/favicon.ico', targetUrl);
     const ogSiteName = cheerioData?.ogSiteName || 'YouTube';
+
+    // Prefer high-res official YouTube video thumbnail if video ID exists in URL
+    try {
+      const match = targetUrl.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
+      if (match && match[1]) {
+        const videoId = match[1];
+        image = `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`;
+      }
+    } catch {
+      // Ignore
+    }
 
     if (title && image) {
       return {

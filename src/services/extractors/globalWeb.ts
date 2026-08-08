@@ -1,20 +1,19 @@
 import { PlatformExtractor, ExtractionResult } from './types';
 import { scrapeWithCheerio } from '../cheerioScraper';
 import { playwrightEngine } from '../playwrightEngine';
-import { resolveUrl, isHomepage } from '../../utils/urlFormatter';
+import { resolveUrl } from '../../utils/urlFormatter';
 
-export const casualWebExtractor: PlatformExtractor = {
+export const globalWebExtractor: PlatformExtractor = {
   async extract(targetUrl: string): Promise<ExtractionResult> {
-    // 1. Cheerio Fast-Path
+    // 1. Cheerio Fast-Path: ALWAYS target og:image or twitter:image first
     const cheerioData = await scrapeWithCheerio(targetUrl);
 
-    const hasTitle = !!(cheerioData && cheerioData.title);
     const hasDirectImage = !!(cheerioData && cheerioData.image);
-    const homepage = isHomepage(targetUrl);
 
-    if (cheerioData && hasTitle && hasDirectImage && !homepage) {
+    // If og:image or twitter:image is found in HTML metadata, return immediately
+    if (cheerioData && hasDirectImage) {
       return {
-        title: cheerioData.title!,
+        title: cheerioData.title || fallbackTitle(targetUrl),
         description: cheerioData.description || '',
         snapshot: cheerioData.image,
         logo: cheerioData.logo || resolveUrl('/favicon.ico', targetUrl),
@@ -22,30 +21,26 @@ export const casualWebExtractor: PlatformExtractor = {
       };
     }
 
-    // 2. Playwright Fallback
+    // 2. Playwright Fallback: Only take a screenshot if NO og:image or twitter:image was found in HTML
+    // Screenshot is fixed at 1920x1080 viewport size (no fullPage scrolling)
     try {
       const pwData = await playwrightEngine.scrape(targetUrl, {
-        containerSelectors: [
-          'article[role="article"]',
-          'article',
-          '[role="main"]',
-          'main',
-          '#content',
-        ],
+        viewport: { width: 1920, height: 1080 },
+        viewportOnly: true,
       });
 
       return {
-        title: pwData.title || cheerioData?.title || fallbackTitle(targetUrl),
-        description: pwData.description || cheerioData?.description || '',
-        snapshot: pwData.snapshot || cheerioData?.image || null,
-        logo: pwData.logo || cheerioData?.logo || resolveUrl('/favicon.ico', targetUrl),
-        ogSiteName: pwData.ogSiteName || cheerioData?.ogSiteName || null,
+        title: cheerioData?.title || pwData.title || fallbackTitle(targetUrl),
+        description: cheerioData?.description || pwData.description || '',
+        snapshot: pwData.snapshot || null,
+        logo: cheerioData?.logo || pwData.logo || resolveUrl('/favicon.ico', targetUrl),
+        ogSiteName: cheerioData?.ogSiteName || pwData.ogSiteName || null,
       };
     } catch {
       return {
         title: cheerioData?.title || fallbackTitle(targetUrl),
         description: cheerioData?.description || '',
-        snapshot: cheerioData?.image || null,
+        snapshot: null,
         logo: cheerioData?.logo || resolveUrl('/favicon.ico', targetUrl),
         ogSiteName: cheerioData?.ogSiteName || null,
       };

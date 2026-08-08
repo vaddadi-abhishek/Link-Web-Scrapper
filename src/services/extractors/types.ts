@@ -4,6 +4,7 @@ export interface ExtractionResult {
   snapshot: string | null;
   logo: string | null;
   ogSiteName: string | null;
+  publishedAt?: string | null;
 }
 
 export interface PlatformExtractor {

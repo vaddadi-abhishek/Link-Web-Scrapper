@@ -14,8 +14,7 @@ export function unescapeHtml(text: string): string {
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&nbsp;/g, ' ')
-    .replace(/\\"/g, '"')
-    .replace(/\\'/g, "'");
+    .replace(/\\+([^a-zA-Z0-9\s])/g, '$1');
 }
 
 // Remove social engagement metrics header from descriptions (Instagram, Facebook, LinkedIn, Twitter)
@@ -59,14 +58,11 @@ export function stripPlatformTitlePrefix(title: string): string {
 export function removeDotSpam(text: string): string {
   if (!text) return '';
 
-  // Replace lines that contain only a dot, dash, or bullet with a clean line break
+  // Replace lines that contain only a dot, dash, or bullet
   let cleaned = text.replace(/(?:\r?\n\s*[\.\•\-]\s*)+/g, '\n');
 
   // Replace inline dot spam like " . . . " or " . . "
   cleaned = cleaned.replace(/(?:\s*\.\s*){3,}/g, ' ');
-
-  // Collapse 3+ consecutive line breaks into 2
-  cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
 
   return cleaned.trim();
 }
@@ -94,7 +90,7 @@ export function stripOuterQuotes(text: string): string {
 }
 
 /**
- * Cleans extracted title string into a single-line, readable, unescaped title.
+ * Cleans extracted title string into an unescaped title, preserving line breaks.
  */
 export function cleanTitle(rawTitle: string | null | undefined): string | null {
   if (!rawTitle) return null;
@@ -104,14 +100,11 @@ export function cleanTitle(rawTitle: string | null | undefined): string | null {
   title = stripOuterQuotes(title);
   title = removeDotSpam(title);
 
-  // For titles, convert all line breaks to single spaces and collapse whitespace
-  title = title.replace(/[\r\n]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
-
-  return title || null;
+  return title.trim() || null;
 }
 
 /**
- * Cleans extracted description string into clean, readable text.
+ * Cleans extracted description string into clean text, preserving line breaks.
  */
 export function cleanDescription(rawDescription: string | null | undefined): string | null {
   if (!rawDescription) return null;
@@ -121,13 +114,5 @@ export function cleanDescription(rawDescription: string | null | undefined): str
   desc = stripOuterQuotes(desc);
   desc = removeDotSpam(desc);
 
-  // Collapse multiple spaces per line
-  desc = desc
-    .split('\n')
-    .map((line) => line.replace(/\s{2,}/g, ' ').trim())
-    .join('\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-
-  return desc || null;
+  return desc.trim() || null;
 }

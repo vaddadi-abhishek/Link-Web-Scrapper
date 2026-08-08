@@ -5,7 +5,7 @@ import { instagramExtractor } from './instagram';
 import { facebookExtractor } from './facebook';
 import { linkedInExtractor } from './linkedin';
 import { youtubeExtractor } from './youtube';
-import { casualWebExtractor } from './casualWeb';
+import { globalWebExtractor } from './globalWeb';
 
 export * from './types';
 
@@ -38,7 +38,7 @@ export function getExtractorForUrl(targetUrl: string): PlatformExtractor {
     // Default fallback
   }
 
-  return casualWebExtractor;
+  return globalWebExtractor;
 }
 
 /**

@@ -8,6 +8,14 @@ export interface PlaywrightExtractionResult {
   snapshot: string | null; // data:image/jpeg;base64,...
   logo: string | null;
   ogSiteName: string | null;
+  author: string | null;
+  authorAvatar: string | null;
+  publishedAt: string | null;
+  type: string | null;
+  likes: number | string | null;
+  comments: number | string | null;
+  shares: number | string | null;
+  views: number | string | null;
 }
 
 export interface PlaywrightScrapeOptions {
@@ -15,6 +23,8 @@ export interface PlaywrightScrapeOptions {
   waitSelector?: string;
   waitTimeout?: number;
   userAgent?: string;
+  viewport?: { width: number; height: number };
+  viewportOnly?: boolean;
 }
 
 const DEFAULT_CONTAINER_SELECTORS = [
@@ -68,7 +78,7 @@ class PlaywrightEngine {
   ): Promise<PlaywrightExtractionResult> {
     const browser = await this.getBrowser();
     const context = await browser.newContext({
-      viewport: { width: 1280, height: 720 },
+      viewport: options.viewport || { width: 1280, height: 720 },
       userAgent:
         options.userAgent ||
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -105,34 +115,63 @@ class PlaywrightEngine {
       // Brief hydration pause
       await page.waitForTimeout(500);
 
+      // Automatically dismiss modal popups, login overlays, and cookie banners before screenshotting
+      await page.evaluate(() => {
+        const dialogSelectors = [
+          '[role="dialog"]',
+          '#login_popup_cta',
+          'div[aria-label="Close"]',
+          'div[aria-label="Decline"]',
+          'div[aria-label="Dismiss"]',
+          'div[aria-label="Log In"]',
+          'div[aria-label="Log in"]',
+          'div[data-testid="cookie-policy-dialog"]',
+          'div[id^="mount_0_0"] div[role="dialog"]',
+        ];
+
+        dialogSelectors.forEach((selector) => {
+          document.querySelectorAll(selector).forEach((element) => {
+            element.remove();
+          });
+        });
+
+        // Restore body/html scrolling and clear blur/overflow locks
+        document.body.style.overflow = 'auto';
+        document.body.style.position = 'static';
+        document.documentElement.style.overflow = 'auto';
+      }).catch(() => {});
+
       // -------------------------------------------------------------
       // Element-Level Container Cropping vs Viewport Fallback
       // -------------------------------------------------------------
       let imageBuffer: Buffer | null = null;
-      const containerSelectors = options.containerSelectors || DEFAULT_CONTAINER_SELECTORS;
 
-      for (const selector of containerSelectors) {
-        try {
-          const element = await page.$(selector);
-          if (element) {
-            const isVisible = await element.isVisible().catch(() => false);
-            const box = await element.boundingBox().catch(() => null);
+      if (!options.viewportOnly) {
+        const containerSelectors = options.containerSelectors || DEFAULT_CONTAINER_SELECTORS;
 
-            // Bounding box checks to ensure element is valid and not empty
-            if (isVisible && box && box.width > 0 && box.height > 0) {
-              imageBuffer = await element.screenshot({
-                type: 'jpeg',
-                quality: 80,
-              });
-              break;
+        for (const selector of containerSelectors) {
+          try {
+            const element = await page.$(selector);
+            if (element) {
+              const isVisible = await element.isVisible().catch(() => false);
+              const box = await element.boundingBox().catch(() => null);
+
+              // Bounding box checks to ensure element is valid and not empty
+              if (isVisible && box && box.width > 0 && box.height > 0) {
+                imageBuffer = await element.screenshot({
+                  type: 'jpeg',
+                  quality: 80,
+                });
+                break;
+              }
             }
+          } catch {
+            // Continue to next selector if check or screenshot fails
           }
-        } catch {
-          // Continue to next selector if check or screenshot fails
         }
       }
 
-      // Fallback to standard 1280x720 viewport screenshot if no container element matched or is visible
+      // Fallback or explicit viewport screenshot (no fullPage scrolling)
       if (!imageBuffer) {
         imageBuffer = await page.screenshot({
           type: 'jpeg',
@@ -147,35 +186,55 @@ class PlaywrightEngine {
       // DOM Metadata Extraction
       // -------------------------------------------------------------
       const metaData = await page.evaluate(() => {
-        const getMeta = (propertyOrName: string) => {
-          const el =
-            document.querySelector(`meta[property="${propertyOrName}"]`) ||
-            document.querySelector(`meta[name="${propertyOrName}"]`);
-          return el ? el.getAttribute('content') : null;
+        const getMeta = (...namesOrProperties: string[]) => {
+          for (const key of namesOrProperties) {
+            const el =
+              document.querySelector(`meta[name="${key}"]`) ||
+              document.querySelector(`meta[property="${key}"]`);
+            if (el) {
+              const content = el.getAttribute('content');
+              if (content && content.trim()) return content.trim();
+            }
+          }
+          return null;
         };
 
-        const ogTitle = getMeta('og:title');
+        // Title resolution order: twitter -> meta -> og -> document.title
         const twitterTitle = getMeta('twitter:title');
-        const docTitle = document.title;
-        const title = (ogTitle || twitterTitle || docTitle || '').trim() || null;
+        const metaTitle = getMeta('title');
+        const ogTitle = getMeta('og:title');
+        const docTitle = document.title ? document.title.trim() : null;
+        const title = twitterTitle || metaTitle || ogTitle || docTitle;
 
-        const ogDesc = getMeta('og:description');
+        // Description resolution order: twitter -> meta -> og
         const twitterDesc = getMeta('twitter:description');
         const metaDesc = getMeta('description');
-        const description = (ogDesc || twitterDesc || metaDesc || '').trim() || null;
+        const ogDesc = getMeta('og:description');
+        const description = twitterDesc || metaDesc || ogDesc;
 
         const ogSiteName = getMeta('og:site_name');
 
+        const author = getMeta('twitter:creator', 'author', 'article:author');
+        const publishedAt = getMeta('article:published_time', 'pubdate');
+        const type = getMeta('og:type') || 'website';
+
+        // Logo resolution order: twitter -> meta -> og -> link icons
+        const twitterLogo = getMeta('twitter:logo', 'twitter:app:icon:iphone');
+        const metaLogo = getMeta('logo');
+        const ogLogo = getMeta('og:logo');
         const appleIcon = document.querySelector('link[rel~="apple-touch-icon"]')?.getAttribute('href');
         const icon = document.querySelector('link[rel~="icon"]')?.getAttribute('href');
         const shortcutIcon = document.querySelector('link[rel~="shortcut icon"]')?.getAttribute('href');
-        const logo = appleIcon || icon || shortcutIcon || null;
+        const logo = twitterLogo || metaLogo || ogLogo || appleIcon || icon || shortcutIcon || null;
 
         return {
           title,
           description,
           ogSiteName,
           logo,
+          author,
+          publishedAt,
+          type,
         };
       });
 
@@ -189,6 +248,14 @@ class PlaywrightEngine {
         snapshot,
         logo,
         ogSiteName: metaData.ogSiteName,
+        author: metaData.author,
+        authorAvatar: null,
+        publishedAt: metaData.publishedAt,
+        type: metaData.type,
+        likes: null,
+        comments: null,
+        shares: null,
+        views: null,
       };
     } finally {
       await page.close().catch(() => {});

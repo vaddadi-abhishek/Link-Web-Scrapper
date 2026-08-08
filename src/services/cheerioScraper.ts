@@ -5,16 +5,31 @@ import { cleanTitle, cleanDescription } from '../utils/textCleaner';
 
 export interface CheerioExtractionResult {
   title: string | null;
+  rawTitle: string | null;
+  twitterTitle: string | null;
   description: string | null;
+  rawDescription: string | null;
   image: string | null;
   logo: string | null;
   ogSiteName: string | null;
+  author: string | null;
+  authorAvatar: string | null;
+  publishedAt: string | null;
+  type: string | null;
+  likes: number | string | null;
+  comments: number | string | null;
+  shares: number | string | null;
+  views: number | string | null;
 }
 
 interface JsonLdData {
   title?: string | null;
   description?: string | null;
   image?: string | null;
+  author?: string | null;
+  authorAvatar?: string | null;
+  publishedAt?: string | null;
+  type?: string | null;
 }
 
 /**
@@ -24,6 +39,10 @@ function extractJsonLd($: cheerio.CheerioAPI): JsonLdData {
   let title: string | null = null;
   let description: string | null = null;
   let image: string | null = null;
+  let author: string | null = null;
+  let authorAvatar: string | null = null;
+  let publishedAt: string | null = null;
+  let type: string | null = null;
 
   const scripts = $('script[type="application/ld+json"]');
   scripts.each((_, el) => {
@@ -46,6 +65,10 @@ function extractJsonLd($: cheerio.CheerioAPI): JsonLdData {
       for (const item of items) {
         if (!item || typeof item !== 'object') continue;
 
+        if (!type && item['@type']) {
+          type = Array.isArray(item['@type']) ? item['@type'][0] : item['@type'];
+        }
+
         // Extract title (headline or name)
         if (!title) {
           const rawTitle = item.headline || item.name;
@@ -62,7 +85,7 @@ function extractJsonLd($: cheerio.CheerioAPI): JsonLdData {
           }
         }
 
-        // Extract image (can be string, object with url property, or array)
+        // Extract image
         if (!image) {
           const rawImg = item.image;
           if (typeof rawImg === 'string' && rawImg.trim()) {
@@ -78,13 +101,35 @@ function extractJsonLd($: cheerio.CheerioAPI): JsonLdData {
             image = rawImg.url.trim();
           }
         }
+
+        // Extract author
+        if (!author && item.author) {
+          if (typeof item.author === 'string') {
+            author = item.author.trim();
+          } else if (typeof item.author === 'object') {
+            author = item.author.name || null;
+            if (typeof item.author.image === 'string') {
+              authorAvatar = item.author.image.trim();
+            } else if (item.author.image && typeof item.author.image.url === 'string') {
+              authorAvatar = item.author.image.url.trim();
+            }
+          }
+        }
+
+        // Extract published date
+        if (!publishedAt) {
+          const pubDate = item.datePublished || item.dateCreated || item.uploadDate;
+          if (typeof pubDate === 'string' && pubDate.trim()) {
+            publishedAt = pubDate.trim();
+          }
+        }
       }
     } catch {
       // Ignore JSON parse failures in script tags
     }
   });
 
-  return { title, description, image };
+  return { title, description, image, author, authorAvatar, publishedAt, type };
 }
 
 /**
@@ -120,24 +165,47 @@ export async function scrapeWithCheerio(targetUrl: string): Promise<CheerioExtra
     // Extract JSON-LD metadata
     const jsonLd = extractJsonLd($);
 
-    // Title resolution: og:title -> twitter:title -> jsonLd.title -> htmlTitle
-    const ogTitle = $('meta[property="og:title"]').attr('content');
-    const twitterTitle = $('meta[name="twitter:title"]').attr('content') || $('meta[property="twitter:title"]').attr('content');
-    const htmlTitle = $('title').first().text();
-    const rawTitle = (ogTitle || twitterTitle || jsonLd.title || htmlTitle || '').trim() || null;
+    // Helper to extract content from an array of meta selectors in order
+    const getMeta = (...selectors: string[]): string | null => {
+      for (const sel of selectors) {
+        const val = $(sel).attr('content');
+        if (val && val.trim()) {
+          return val.trim();
+        }
+      }
+      return null;
+    };
+
+    // 1. Title resolution order: twitter -> meta property/name -> og -> jsonLd -> htmlTitle
+    const twitterTitle = getMeta('meta[name="twitter:title"]', 'meta[property="twitter:title"]');
+    const metaTitle = getMeta('meta[property="title"]', 'meta[name="title"]');
+    const ogTitle = getMeta('meta[property="og:title"]', 'meta[name="og:title"]');
+    const htmlTitle = $('title').first().text().trim() || null;
+    const rawTitle = twitterTitle || metaTitle || ogTitle || jsonLd.title || htmlTitle || null;
     const title = cleanTitle(rawTitle);
 
-    // Description resolution: og:description -> twitter:description -> jsonLd.description -> meta:description
-    const ogDesc = $('meta[property="og:description"]').attr('content');
-    const twitterDesc = $('meta[name="twitter:description"]').attr('content') || $('meta[property="twitter:description"]').attr('content');
-    const metaDesc = $('meta[name="description"]').attr('content');
-    const rawDesc = (ogDesc || twitterDesc || jsonLd.description || metaDesc || '').trim() || null;
+    // 2. Description resolution order: twitter -> meta property/name -> og -> jsonLd
+    const twitterDesc = getMeta('meta[name="twitter:description"]', 'meta[property="twitter:description"]');
+    const metaDesc = getMeta('meta[property="description"]', 'meta[name="description"]');
+    const ogDesc = getMeta('meta[property="og:description"]', 'meta[name="og:description"]');
+    const rawDesc = twitterDesc || metaDesc || ogDesc || jsonLd.description || null;
     const description = cleanDescription(rawDesc);
 
-    // Direct Image resolution: og:image -> twitter:image -> jsonLd.image
-    const ogImage = $('meta[property="og:image"]').attr('content') || $('meta[property="og:image:secure_url"]').attr('content');
-    const twitterImage = $('meta[name="twitter:image"]').attr('content') || $('meta[property="twitter:image"]').attr('content');
-    const rawImage = (ogImage || twitterImage || jsonLd.image || '').trim() || null;
+    // 3. Direct Image resolution order: twitter -> meta property/name -> og -> jsonLd
+    const twitterImage = getMeta(
+      'meta[name="twitter:image"]',
+      'meta[property="twitter:image"]',
+      'meta[name="twitter:image:src"]',
+      'meta[property="twitter:image:src"]'
+    );
+    const metaImage = getMeta('meta[property="image"]', 'meta[name="image"]');
+    const ogImage = getMeta(
+      'meta[property="og:image"]',
+      'meta[name="og:image"]',
+      'meta[property="og:image:secure_url"]',
+      'meta[name="og:image:secure_url"]'
+    );
+    const rawImage = twitterImage || metaImage || ogImage || jsonLd.image || null;
     let image = resolveUrl(rawImage, targetUrl);
 
     // Reddit shreddit-post content-href attribute extraction
@@ -163,25 +231,59 @@ export async function scrapeWithCheerio(targetUrl: string): Promise<CheerioExtra
       }
     }
 
-    // Logo / Favicon resolution
+    // 4. Logo resolution order: twitter -> meta property/name -> og -> link icons -> /favicon.ico
+    const twitterLogo = getMeta(
+      'meta[name="twitter:logo"]',
+      'meta[property="twitter:logo"]',
+      'meta[name="twitter:app:icon:iphone"]',
+      'meta[name="twitter:app:icon:googleplay"]'
+    );
+    const metaLogo = getMeta('meta[property="logo"]', 'meta[name="logo"]');
+    const ogLogo = getMeta('meta[property="og:logo"]', 'meta[name="og:logo"]');
     const appleIcon = $('link[rel~="apple-touch-icon"]').attr('href');
     const icon = $('link[rel~="icon"]').attr('href');
     const shortcutIcon = $('link[rel~="shortcut icon"]').attr('href');
-    const rawLogo = appleIcon || icon || shortcutIcon;
+    const rawLogo = twitterLogo || metaLogo || ogLogo || appleIcon || icon || shortcutIcon;
     const logo = resolveUrl(rawLogo, targetUrl) || resolveUrl('/favicon.ico', targetUrl);
 
     // og:site_name
     const ogSiteName = $('meta[property="og:site_name"]').attr('content') || null;
 
+    // Author resolution
+    const metaAuthor = $('meta[name="author"]').attr('content') || $('meta[property="article:author"]').attr('content') || $('meta[name="twitter:creator"]').attr('content');
+    const author = (metaAuthor || jsonLd.author || '').trim() || null;
+
+    // Published date resolution
+    const metaDate = $('meta[property="article:published_time"]').attr('content') || $('meta[name="pubdate"]').attr('content') || $('meta[name="date"]').attr('content');
+    const publishedAt = (metaDate || jsonLd.publishedAt || '').trim() || null;
+
+    // Type resolution
+    const metaType = $('meta[property="og:type"]').attr('content');
+    const type = (metaType || jsonLd.type || 'website').trim();
+
+    // Author avatar resolution
+    const authorAvatar = resolveUrl(jsonLd.authorAvatar, targetUrl);
+
     return {
       title,
+      rawTitle,
+      twitterTitle: twitterTitle || null,
       description,
+      rawDescription: rawDesc,
       image,
       logo,
       ogSiteName,
+      author,
+      authorAvatar,
+      publishedAt,
+      type,
+      likes: null,
+      comments: null,
+      shares: null,
+      views: null,
     };
   } catch (error) {
-    // Return null if request times out or returns error status
+    console.error(`[cheerioScraper] Error scraping ${targetUrl}:`, error);
     return null;
   }
 }
