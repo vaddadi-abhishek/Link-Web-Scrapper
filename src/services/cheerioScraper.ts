@@ -188,14 +188,27 @@ export async function scrapeWithCheerio(targetUrl: string): Promise<CheerioExtra
     const ogTitle = getMeta('meta[property="og:title"]', 'meta[name="og:title"]');
     const htmlTitle = $('title').first().text().trim() || null;
     const rawTitle = twitterTitle || metaTitle || ogTitle || jsonLd.title || htmlTitle || null;
-    const title = cleanTitle(rawTitle);
+    let title = cleanTitle(rawTitle);
 
     // 2. Description resolution order: twitter -> meta property/name -> og -> jsonLd
     const twitterDesc = getMeta('meta[name="twitter:description"]', 'meta[property="twitter:description"]');
     const metaDesc = getMeta('meta[property="description"]', 'meta[name="description"]');
     const ogDesc = getMeta('meta[property="og:description"]', 'meta[name="og:description"]');
     const rawDesc = twitterDesc || metaDesc || ogDesc || jsonLd.description || null;
-    const description = cleanDescription(rawDesc);
+    let description = cleanDescription(rawDesc);
+
+    // Filter generic Login / Auth Wall metadata (e.g. "Login • Instagram", "Welcome back to Instagram...")
+    const combinedAuth = `${title || ''} ${description || ''}`.toLowerCase();
+    if (
+      combinedAuth.includes('login • instagram') ||
+      combinedAuth.includes('welcome back to instagram') ||
+      combinedAuth.includes('sign in to check out what your friends') ||
+      combinedAuth.includes('log in to instagram') ||
+      title?.toLowerCase() === 'login'
+    ) {
+      title = null;
+      description = null;
+    }
 
     // 3. Direct Image resolution order: twitter -> meta property/name -> og -> jsonLd
     const twitterImage = getMeta(

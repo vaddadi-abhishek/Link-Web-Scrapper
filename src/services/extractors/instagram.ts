@@ -5,6 +5,19 @@ import { resolveUrl } from '../../utils/urlFormatter';
 import { cleanTitle } from '../../utils/textCleaner';
 import { parseFormattedNumber } from '../../utils/numberParser';
 
+function cleanInstagramText(raw: string | null): string {
+  if (!raw) return '';
+  return raw
+    .replace(/\\u0026/g, '&')
+    .replace(/\\u0027/g, "'")
+    .replace(/\\u0022/g, '"')
+    .replace(/\\n/g, '\n')
+    .replace(/\\/g, '')
+    .replace(/&#064;/g, '@')
+    .replace(/<[^>]+>/g, '')
+    .trim();
+}
+
 export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
   platformKey: 'instagram',
   async extract(targetUrl: string): Promise<ExtractionResult<InstagramCardData>> {
@@ -13,7 +26,7 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
 
     let title = cheerioData?.title || null;
     let description = cheerioData?.description || null;
-    const image = cheerioData?.image || null;
+    let image = cheerioData?.image || null;
     const logo = cheerioData?.logo || resolveUrl('/favicon.ico', targetUrl);
     const ogSiteName = cheerioData?.ogSiteName || 'Instagram';
     let publishedAt: string | null = cheerioData?.publishedAt || null;
@@ -72,10 +85,12 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
       }
     }
 
-    // Extract reel video URL via embed fast-path if present
+    // Extract Reel/Post video & image URLs via Instagram embed fast-path
     const shortcodeMatch = targetUrl.match(/\/(?:reel|reels|p|tv)\/([a-zA-Z0-9_-]+)/i);
     const shortcode = shortcodeMatch ? shortcodeMatch[1] : null;
     let videoUrl: string | null = null;
+    let embedImage: string | null = null;
+    let embedAvatar: string | null = null;
 
     if (shortcode) {
       try {
@@ -84,17 +99,54 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
             'User-Agent':
               'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
           },
-          timeout: 4000,
+          timeout: 4500,
         });
         const embedHtml = String(embedRes.data || '');
+        
+        // Direct Video URL
         const videoMatch = embedHtml.match(/"video_url"\s*:\s*"([^"]+)"/) || embedHtml.match(/video_url\\":\s*\\?"([^"]+)\\?"/);
         if (videoMatch && videoMatch[1]) {
-          videoUrl = videoMatch[1].replace(/\\u0026/g, '&').replace(/\\/g, '');
+          videoUrl = cleanInstagramText(videoMatch[1]);
+        }
+
+        // Thumbnail Cover Image URL
+        const displayMatch = embedHtml.match(/"display_url"\s*:\s*"([^"]+)"/) || 
+                             embedHtml.match(/display_url\\":\s*\\?"([^"]+)\\?"/) ||
+                             embedHtml.match(/class="EmbeddedMediaImage"[^>]+src="([^"]+)"/) ||
+                             embedHtml.match(/thumbnail_src\\":\s*\\?"([^"]+)\\?"/) ||
+                             embedHtml.match(/<img[^>]+src="([^"]+)"/);
+        if (displayMatch && displayMatch[1]) {
+          embedImage = cleanInstagramText(displayMatch[1]);
+        }
+
+        // Username
+        const usernameMatch = embedHtml.match(/"username"\s*:\s*"([^"]+)"/) || embedHtml.match(/class="UsernameText"[^>]*>([^<]+)/);
+        if (usernameMatch && usernameMatch[1] && username === 'unknown') {
+          username = cleanInstagramText(usernameMatch[1]);
+          if (displayName === 'Instagram User' || displayName === 'Instagram Post') {
+            displayName = username;
+          }
+        }
+
+        // Avatar
+        const avatarMatch = embedHtml.match(/"profile_pic_url"\s*:\s*"([^"]+)"/) || embedHtml.match(/class="Avatar[^"]*"[^>]+src="([^"]+)"/);
+        if (avatarMatch && avatarMatch[1]) {
+          embedAvatar = cleanInstagramText(avatarMatch[1]);
+        }
+
+        // Caption Text
+        const captionMatch = embedHtml.match(/class="CaptionText"[^>]*>([\s\S]*?)<\/div>/) || 
+                             embedHtml.match(/class="Caption"[^>]*>([\s\S]*?)<\/div>/) ||
+                             embedHtml.match(/"caption"\s*:\s*\{"text"\s*:\s*"([^"]+)"\}/);
+        if (captionMatch && captionMatch[1] && (!description || description.trim() === '')) {
+          description = cleanInstagramText(captionMatch[1]);
         }
       } catch {
-        // Fallback to non-video metadata if embed fetch fails
+        // Fallback if embed fetch times out
       }
     }
+
+    const finalSnapshot = image || embedImage || null;
 
     // Construct media list with direct video URL and/or image snapshot
     const mediaList: MediaItem[] = [];
@@ -106,16 +158,10 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
       });
     }
 
-    if (image) {
+    if (finalSnapshot) {
       mediaList.push({
         type: 'image',
-        url: image,
-      });
-    } else if (!videoUrl && image) {
-      const isReelOrVideo = targetUrl.toLowerCase().includes('/reel/') || targetUrl.toLowerCase().includes('/reels/');
-      mediaList.push({
-        type: isReelOrVideo ? 'video' : 'image',
-        url: image,
+        url: finalSnapshot,
       });
     }
 
@@ -123,7 +169,7 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
       author: {
         username,
         name: displayName,
-        avatar_url: cheerioData?.authorAvatar || null,
+        avatar_url: cheerioData?.authorAvatar || embedAvatar || null,
         verified: false,
       },
       metrics,
@@ -132,9 +178,9 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
     };
 
     return {
-      title: title || 'Instagram Post',
+      title: title && title !== 'Instagram Post' ? title : (username !== 'unknown' ? `Post by @${username} on Instagram` : 'Instagram Post'),
       description: description || '',
-      snapshot: image,
+      snapshot: finalSnapshot,
       logo,
       ogSiteName,
       card_data,

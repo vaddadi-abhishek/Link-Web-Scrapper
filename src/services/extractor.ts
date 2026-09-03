@@ -19,7 +19,7 @@ export interface ExtractionResponse {
 export async function extractMetadata(rawUrl: string): Promise<ExtractionResponse> {
   const url = normalizeUrl(rawUrl);
 
-  const result = await dispatchExtraction(url);
+  const { result, platform } = await dispatchExtraction(url);
 
   const siteName = deriveSiteName(url, result.ogSiteName);
   const title = cleanTitle(result.title) || fallbackTitle(url);
@@ -27,7 +27,7 @@ export async function extractMetadata(rawUrl: string): Promise<ExtractionRespons
 
   // Only populate published_at for Instagram (e.g. "August 1, 2026"), null for all other sites
   const isInstagram = url.toLowerCase().includes('instagram.com');
-  const published_at = isInstagram ? result.publishedAt || null : null;
+  const published_at = isInstagram ? (result as any).publishedAt || null : null;
 
   return {
     url,
