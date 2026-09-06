@@ -28,17 +28,15 @@ const buildGlobalCardData = (
 export const globalWebExtractor: PlatformExtractor<GlobalWebCardData> = {
   platformKey: 'generic',
   async extract(targetUrl: string): Promise<ExtractionResult<GlobalWebCardData>> {
-    // 1. Cheerio Fast-Path: ALWAYS target og:image or twitter:image first
+    // 1. Cheerio Fast-Path: Ultra-fast (~150-300ms) metadata extraction
     const cheerioData = await scrapeWithCheerio(targetUrl);
 
-    const hasDirectImage = !!(cheerioData && cheerioData.image);
-
-    // If og:image or twitter:image is found in HTML metadata, return immediately
-    if (cheerioData && hasDirectImage) {
+    // If Cheerio extracted a title, description, or image, return immediately without invoking Playwright
+    if (cheerioData && (cheerioData.title || cheerioData.description || cheerioData.image)) {
       return {
         title: cheerioData.title || fallbackTitle(targetUrl),
         description: cheerioData.description || '',
-        snapshot: cheerioData.image,
+        snapshot: cheerioData.image || null,
         logo: cheerioData.logo || resolveUrl('/favicon.ico', targetUrl),
         ogSiteName: cheerioData.ogSiteName,
         card_data: buildGlobalCardData(
@@ -50,31 +48,30 @@ export const globalWebExtractor: PlatformExtractor<GlobalWebCardData> = {
       };
     }
 
-    // 2. Playwright Fallback: Only take a screenshot if NO og:image or twitter:image was found in HTML
+    // 2. Playwright Fallback: Headless browser (<2s, styles/images blocked) for JS-rendered SPAs or blocked requests
     try {
       const pwData = await playwrightEngine.scrape(targetUrl, {
-        viewport: { width: 1920, height: 1080 },
-        viewportOnly: true,
+        waitTimeout: 2000,
       });
 
       return {
-        title: cheerioData?.title || pwData.title || fallbackTitle(targetUrl),
-        description: cheerioData?.description || pwData.description || '',
-        snapshot: pwData.snapshot || null,
-        logo: cheerioData?.logo || pwData.logo || resolveUrl('/favicon.ico', targetUrl),
-        ogSiteName: cheerioData?.ogSiteName || pwData.ogSiteName || null,
+        title: pwData.title || cheerioData?.title || fallbackTitle(targetUrl),
+        description: pwData.description || cheerioData?.description || '',
+        snapshot: pwData.snapshot || cheerioData?.image || null,
+        logo: pwData.logo || cheerioData?.logo || resolveUrl('/favicon.ico', targetUrl),
+        ogSiteName: pwData.ogSiteName || cheerioData?.ogSiteName || null,
         card_data: buildGlobalCardData(
-          cheerioData?.author || pwData.author,
-          cheerioData?.publishedAt || pwData.publishedAt,
-          cheerioData?.ogSiteName || pwData.ogSiteName,
-          cheerioData?.type || pwData.type
+          pwData.author || cheerioData?.author || null,
+          pwData.publishedAt || cheerioData?.publishedAt || null,
+          pwData.ogSiteName || cheerioData?.ogSiteName || null,
+          pwData.type || cheerioData?.type || null
         ),
       };
     } catch {
       return {
         title: cheerioData?.title || fallbackTitle(targetUrl),
         description: cheerioData?.description || '',
-        snapshot: null,
+        snapshot: cheerioData?.image || null,
         logo: cheerioData?.logo || resolveUrl('/favicon.ico', targetUrl),
         ogSiteName: cheerioData?.ogSiteName || null,
         card_data: buildGlobalCardData(

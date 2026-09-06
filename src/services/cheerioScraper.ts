@@ -148,7 +148,7 @@ export async function scrapeWithCheerio(targetUrl: string): Promise<CheerioExtra
       : 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)';
 
     const response = await axios.get(targetUrl, {
-      timeout: 4000,
+      timeout: 2500,
       httpAgent,
       httpsAgent,
       headers: {
@@ -182,19 +182,25 @@ export async function scrapeWithCheerio(targetUrl: string): Promise<CheerioExtra
       return null;
     };
 
-    // 1. Title resolution order: twitter -> meta property/name -> og -> jsonLd -> htmlTitle
+    // 1. Title resolution order: twitter -> og -> meta[name="title"] -> jsonLd -> htmlTitle -> h1
     const twitterTitle = getMeta('meta[name="twitter:title"]', 'meta[property="twitter:title"]');
-    const metaTitle = getMeta('meta[property="title"]', 'meta[name="title"]');
     const ogTitle = getMeta('meta[property="og:title"]', 'meta[name="og:title"]');
+    const metaTitle = getMeta('meta[name="title"]', 'meta[property="title"]');
     const htmlTitle = $('title').first().text().trim() || null;
-    const rawTitle = twitterTitle || metaTitle || ogTitle || jsonLd.title || htmlTitle || null;
+    const h1Title = $('h1').first().text().trim() || null;
+    const rawTitle = twitterTitle || ogTitle || metaTitle || jsonLd.title || htmlTitle || h1Title || null;
     let title = cleanTitle(rawTitle);
 
-    // 2. Description resolution order: twitter -> meta property/name -> og -> jsonLd
+    // 2. Description resolution order: twitter -> og -> meta[name="description"] -> jsonLd -> first <p>
     const twitterDesc = getMeta('meta[name="twitter:description"]', 'meta[property="twitter:description"]');
-    const metaDesc = getMeta('meta[property="description"]', 'meta[name="description"]');
     const ogDesc = getMeta('meta[property="og:description"]', 'meta[name="og:description"]');
-    const rawDesc = twitterDesc || metaDesc || ogDesc || jsonLd.description || null;
+    const metaDesc = getMeta('meta[name="description"]', 'meta[property="description"]');
+    let firstP: string | null = null;
+    const pText = $('article p, main p, p').first().text().trim();
+    if (pText && pText.length > 20) {
+      firstP = pText.substring(0, 300);
+    }
+    const rawDesc = twitterDesc || ogDesc || metaDesc || jsonLd.description || firstP || null;
     let description = cleanDescription(rawDesc);
 
     // Filter generic Login / Auth Wall metadata (e.g. "Login • Instagram", "Welcome back to Instagram...")
@@ -210,21 +216,21 @@ export async function scrapeWithCheerio(targetUrl: string): Promise<CheerioExtra
       description = null;
     }
 
-    // 3. Direct Image resolution order: twitter -> meta property/name -> og -> jsonLd
-    const twitterImage = getMeta(
-      'meta[name="twitter:image"]',
-      'meta[property="twitter:image"]',
-      'meta[name="twitter:image:src"]',
-      'meta[property="twitter:image:src"]'
-    );
-    const metaImage = getMeta('meta[property="image"]', 'meta[name="image"]');
+    // 3. Direct Image resolution order prioritizing og:image and twitter:image
     const ogImage = getMeta(
       'meta[property="og:image"]',
       'meta[name="og:image"]',
       'meta[property="og:image:secure_url"]',
       'meta[name="og:image:secure_url"]'
     );
-    const rawImage = twitterImage || metaImage || ogImage || jsonLd.image || null;
+    const twitterImage = getMeta(
+      'meta[name="twitter:image"]',
+      'meta[property="twitter:image"]',
+      'meta[name="twitter:image:src"]',
+      'meta[property="twitter:image:src"]'
+    );
+    const metaImage = getMeta('meta[name="image"]', 'meta[property="image"]');
+    const rawImage = ogImage || twitterImage || metaImage || jsonLd.image || null;
     let image = resolveUrl(rawImage, targetUrl);
 
     // Reddit shreddit-post content-href attribute extraction

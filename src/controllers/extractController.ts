@@ -31,30 +31,26 @@ export const extractMetadataController = async (req: Request, res: Response): Pr
     const { result, platform } = await dispatchExtraction(url, html);
     const siteName = deriveSiteName(url, result.ogSiteName);
 
-    // Perform AI Visual Intelligence Analysis
-    const aiAnalysis = await analyzeVisualContext({
-      url,
-      title: result.title || '',
-      description: result.description || '',
-      snapshot: result.snapshot || null,
-      site_name: siteName,
-      type: platform,
-      card_data: result.card_data,
-    });
+    // AI Context invocation disabled during scraping for speed & optimization
+    // Standalone analysis remains available via POST /api/v1/ai-analyze
+    const aiContext: string | null = null;
+    const aiTags: string[] = [];
+    const visualEntities: string[] = [];
+    const ocrText = '';
 
     res.status(200).json({
       type: platform,
       url,
-      title: result.title || 'Unknown Title',
+      title: result.title !== undefined ? result.title : null,
       description: result.description || '',
       snapshot: result.snapshot || null,
       logo: result.logo || null,
       site_name: siteName,
       card_data: result.card_data,
-      ai_context: aiAnalysis.ai_context,
-      ai_tags: aiAnalysis.ai_tags,
-      visual_entities: aiAnalysis.visual_entities,
-      ocr_text: aiAnalysis.ocr_text,
+      ai_context: aiContext,
+      ai_tags: aiTags,
+      visual_entities: visualEntities,
+      ocr_text: ocrText,
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to extract metadata' });

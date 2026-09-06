@@ -2,7 +2,7 @@ import { chromium, Browser } from 'playwright';
 import { resolveUrl } from '../utils/urlFormatter';
 import { cleanTitle, cleanDescription } from '../utils/textCleaner';
 
-export interface PlaywrightExtractionResult {
+export interface PlaywrightExtractionResult<T = any> {
   title: string | null;
   description: string | null;
   snapshot: string | null; // data:image/jpeg;base64,...
@@ -13,25 +13,20 @@ export interface PlaywrightExtractionResult {
   publishedAt: string | null;
   type: string | null;
   html?: string | null;
+  customData?: T;
 }
 
-export interface PlaywrightScrapeOptions {
+export interface PlaywrightScrapeOptions<T = any> {
   containerSelectors?: string[];
   waitSelector?: string;
   waitTimeout?: number;
+  timeout?: number;
   userAgent?: string;
   viewport?: { width: number; height: number };
   viewportOnly?: boolean;
+  customEvaluator?: (page: import('playwright').Page) => Promise<T>;
 }
 
-const DEFAULT_CONTAINER_SELECTORS = [
-  'shreddit-post',
-  'article[role="article"]',
-  'article',
-  '[role="main"]',
-  'main',
-  '#content',
-];
 
 class PlaywrightEngine {
   private static instance: PlaywrightEngine;
@@ -66,6 +61,9 @@ class PlaywrightEngine {
             '--disable-translate',
             '--disable-sync',
             '--metrics-recording-only',
+            '--blink-settings=imagesEnabled=false',
+            '--disable-extensions',
+            '--mute-audio',
           ],
         })
         .catch((err) => {
@@ -76,10 +74,10 @@ class PlaywrightEngine {
     return this.browserPromise;
   }
 
-  public async scrape(
+  public async scrape<T = any>(
     targetUrl: string,
-    options: PlaywrightScrapeOptions = {}
-  ): Promise<PlaywrightExtractionResult> {
+    options: PlaywrightScrapeOptions<T> = {}
+  ): Promise<PlaywrightExtractionResult<T>> {
     const browser = await this.getBrowser();
     const context = await browser.newContext({
       viewport: options.viewport || { width: 1280, height: 720 },
@@ -91,112 +89,47 @@ class PlaywrightEngine {
     const page = await context.newPage();
 
     try {
-      // Abort heavy resource types and analytics/ad trackers
+      // Abort stylesheets, images, fonts, media, websockets, and trackers for ultra-fast rendering
       await page.route('**/*', (route) => {
         const reqUrl = route.request().url().toLowerCase();
         const resourceType = route.request().resourceType();
 
+        const blockedTypes = ['stylesheet', 'image', 'media', 'font', 'ping', 'eventsource', 'websocket', 'manifest'];
         if (
-          resourceType === 'media' ||
-          resourceType === 'font' ||
+          blockedTypes.includes(resourceType) ||
           reqUrl.includes('google-analytics.com') ||
           reqUrl.includes('googletagmanager.com') ||
           reqUrl.includes('connect.facebook.net') ||
-          reqUrl.includes('doubleclick.net')
+          reqUrl.includes('doubleclick.net') ||
+          reqUrl.includes('clarity.ms') ||
+          reqUrl.includes('hotjar.com')
         ) {
           return route.abort();
         }
         return route.continue();
       });
 
-      // Navigate to target URL
+      // Navigate to target URL with configurable or default timeout
       await page.goto(targetUrl, {
         waitUntil: 'domcontentloaded',
-        timeout: 15000,
+        timeout: options.timeout || 7000,
       });
 
-      // Wait for target selector if specified
+      // Wait for target selector if specified with strict timeout
       if (options.waitSelector) {
         await page
           .waitForSelector(options.waitSelector, {
             state: 'attached',
-            timeout: options.waitTimeout || 5000,
+            timeout: options.waitTimeout || 2000,
           })
           .catch(() => {});
       }
 
-      // Brief hydration pause
-      await page.waitForTimeout(500);
-
-      // Automatically dismiss modal popups, login overlays, and cookie banners before screenshotting
-      await page.evaluate(() => {
-        const dialogSelectors = [
-          '[role="dialog"]',
-          '#login_popup_cta',
-          'div[aria-label="Close"]',
-          'div[aria-label="Decline"]',
-          'div[aria-label="Dismiss"]',
-          'div[aria-label="Log In"]',
-          'div[aria-label="Log in"]',
-          'div[data-testid="cookie-policy-dialog"]',
-          'div[id^="mount_0_0"] div[role="dialog"]',
-        ];
-
-        dialogSelectors.forEach((selector) => {
-          document.querySelectorAll(selector).forEach((element) => {
-            element.remove();
-          });
-        });
-
-        // Restore body/html scrolling and clear blur/overflow locks
-        document.body.style.overflow = 'auto';
-        document.body.style.position = 'static';
-        document.documentElement.style.overflow = 'auto';
-      }).catch(() => {});
+      // Fast hydration pause
+      await page.waitForTimeout(100);
 
       // -------------------------------------------------------------
-      // Element-Level Container Cropping vs Viewport Fallback
-      // -------------------------------------------------------------
-      let imageBuffer: Buffer | null = null;
-
-      if (!options.viewportOnly) {
-        const containerSelectors = options.containerSelectors || DEFAULT_CONTAINER_SELECTORS;
-
-        for (const selector of containerSelectors) {
-          try {
-            const element = await page.$(selector);
-            if (element) {
-              const isVisible = await element.isVisible().catch(() => false);
-              const box = await element.boundingBox().catch(() => null);
-
-              // Bounding box checks to ensure element is valid and not empty
-              if (isVisible && box && box.width > 0 && box.height > 0) {
-                imageBuffer = await element.screenshot({
-                  type: 'jpeg',
-                  quality: 80,
-                });
-                break;
-              }
-            }
-          } catch {
-            // Continue to next selector if check or screenshot fails
-          }
-        }
-      }
-
-      // Fallback or explicit viewport screenshot (no fullPage scrolling)
-      if (!imageBuffer) {
-        imageBuffer = await page.screenshot({
-          type: 'jpeg',
-          quality: 75,
-          fullPage: false,
-        });
-      }
-
-      const snapshot = `data:image/jpeg;base64,${imageBuffer.toString('base64')}`;
-
-      // -------------------------------------------------------------
-      // DOM Metadata Extraction
+      // DOM Metadata Extraction (No screenshotting logic)
       // -------------------------------------------------------------
       const metaData = await page.evaluate(() => {
         const getMeta = (...namesOrProperties: string[]) => {
@@ -212,18 +145,33 @@ class PlaywrightEngine {
           return null;
         };
 
-        // Title resolution order: twitter -> meta -> og -> document.title
+        // Title resolution order: twitter:title -> og:title -> meta[name="title"] -> document.title -> h1
         const twitterTitle = getMeta('twitter:title');
-        const metaTitle = getMeta('title');
         const ogTitle = getMeta('og:title');
+        const metaTitle = getMeta('title');
         const docTitle = document.title ? document.title.trim() : null;
-        const title = twitterTitle || metaTitle || ogTitle || docTitle;
+        const h1Title = document.querySelector('h1')?.textContent?.trim() || null;
+        const title = twitterTitle || ogTitle || metaTitle || docTitle || h1Title;
 
-        // Description resolution order: twitter -> meta -> og
+        // Description resolution order: twitter:description -> og:description -> meta[name="description"] -> first readable p
         const twitterDesc = getMeta('twitter:description');
-        const metaDesc = getMeta('description');
         const ogDesc = getMeta('og:description');
-        const description = twitterDesc || metaDesc || ogDesc;
+        const metaDesc = getMeta('description');
+        let firstP: string | null = null;
+        const pEl = document.querySelector('article p, main p, p');
+        if (pEl && pEl.textContent) {
+          const text = pEl.textContent.trim();
+          if (text.length > 20) {
+            firstP = text.substring(0, 300);
+          }
+        }
+        const description = twitterDesc || ogDesc || metaDesc || firstP;
+
+        // Snapshot resolution order: og:image -> twitter:image -> meta[name="image"]
+        const ogImage = getMeta('og:image', 'og:image:secure_url');
+        const twitterImage = getMeta('twitter:image', 'twitter:image:src');
+        const metaImage = getMeta('image');
+        const image = ogImage || twitterImage || metaImage || null;
 
         const ogSiteName = getMeta('og:site_name');
 
@@ -243,17 +191,28 @@ class PlaywrightEngine {
         return {
           title,
           description,
+          image,
           ogSiteName,
           logo,
           author,
           publishedAt,
-          type
+          type,
         };
       });
 
       const domain = new URL(targetUrl).hostname;
       const fallbackLogo = `https://www.google.com/s2/favicons?domain=${domain}&sz=128`;
       const logo = resolveUrl(metaData.logo, targetUrl) || fallbackLogo;
+      const snapshot = resolveUrl(metaData.image, targetUrl);
+
+      let customData: T | undefined;
+      if (options.customEvaluator) {
+        try {
+          customData = await options.customEvaluator(page);
+        } catch {
+          // Ignore evaluator error
+        }
+      }
 
       return {
         title: cleanTitle(metaData.title),
@@ -266,6 +225,7 @@ class PlaywrightEngine {
         publishedAt: metaData.publishedAt,
         type: metaData.type,
         html: await page.content().catch(() => null),
+        customData,
       };
     } finally {
       await page.close().catch(() => {});

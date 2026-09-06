@@ -1,9 +1,13 @@
 import axios from 'axios';
+import * as cheerio from 'cheerio';
 import { PlatformExtractor, ExtractionResult, InstagramCardData, MediaItem } from './types';
 import { scrapeWithCheerio } from '../cheerioScraper';
+import { playwrightEngine } from '../playwrightEngine';
 import { resolveUrl } from '../../utils/urlFormatter';
 import { cleanTitle } from '../../utils/textCleaner';
 import { parseFormattedNumber } from '../../utils/numberParser';
+
+const INSTAGRAM_LOGO_URL = 'https://static.cdninstagram.com/rsrc.php/v3/yI/r/VsNE-OHk_8a.png';
 
 function cleanInstagramText(raw: string | null): string {
   if (!raw) return '';
@@ -18,6 +22,17 @@ function cleanInstagramText(raw: string | null): string {
     .trim();
 }
 
+function isAvatarUrl(url: string): boolean {
+  const l = url.toLowerCase();
+  return (
+    l.includes('150x150') ||
+    l.includes('s150x150') ||
+    l.includes('profile_pic') ||
+    l.includes('avatar') ||
+    l.includes('rsrc.php')
+  );
+}
+
 export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
   platformKey: 'instagram',
   async extract(targetUrl: string): Promise<ExtractionResult<InstagramCardData>> {
@@ -27,7 +42,6 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
     let title = cheerioData?.title || null;
     let description = cheerioData?.description || null;
     let image = cheerioData?.image || null;
-    const logo = cheerioData?.logo || resolveUrl('/favicon.ico', targetUrl);
     const ogSiteName = cheerioData?.ogSiteName || 'Instagram';
     let publishedAt: string | null = cheerioData?.publishedAt || null;
 
@@ -77,7 +91,9 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
     }
 
     // Parse Date Posted from text string (e.g. "on August 1, 2026")
-    const dateMatch = rawDesc.match(/\bon\s+([A-Za-z]+\s+\d{1,2},?\s*\d{4})\b/i) || combinedText.match(/\bon\s+([A-Za-z]+\s+\d{1,2},?\s*\d{4})\b/i);
+    const dateMatch =
+      rawDesc.match(/\bon\s+([A-Za-z]+\s+\d{1,2},?\s*\d{4})\b/i) ||
+      combinedText.match(/\bon\s+([A-Za-z]+\s+\d{1,2},?\s*\d{4})\b/i);
     if (dateMatch && dateMatch[1]) {
       const parsedDate = new Date(dateMatch[1].trim());
       if (!isNaN(parsedDate.getTime())) {
@@ -85,11 +101,11 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
       }
     }
 
-    // Extract Reel/Post video & image URLs via Instagram embed fast-path
+    // Extract Reel/Post video & carousel image URLs via Instagram embed fast-path
     const shortcodeMatch = targetUrl.match(/\/(?:reel|reels|p|tv)\/([a-zA-Z0-9_-]+)/i);
     const shortcode = shortcodeMatch ? shortcodeMatch[1] : null;
-    let videoUrl: string | null = null;
-    let embedImage: string | null = null;
+    const mediaList: MediaItem[] = [];
+    const discoveredImageUrls: string[] = [];
     let embedAvatar: string | null = null;
 
     if (shortcode) {
@@ -102,25 +118,50 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
           timeout: 4500,
         });
         const embedHtml = String(embedRes.data || '');
-        
-        // Direct Video URL
-        const videoMatch = embedHtml.match(/"video_url"\s*:\s*"([^"]+)"/) || embedHtml.match(/video_url\\":\s*\\?"([^"]+)\\?"/);
-        if (videoMatch && videoMatch[1]) {
-          videoUrl = cleanInstagramText(videoMatch[1]);
+
+        // 1. Direct Video URLs (collect all videos)
+        const videoRegex = /"video_url"\s*:\s*"([^"]+)"/g;
+        let vMatch: RegExpExecArray | null;
+        while ((vMatch = videoRegex.exec(embedHtml)) !== null) {
+          const vUrl = cleanInstagramText(vMatch[1]);
+          if (vUrl && !mediaList.some((m) => m.url === vUrl)) {
+            mediaList.push({ type: 'video', url: vUrl });
+          }
         }
 
-        // Thumbnail Cover Image URL
-        const displayMatch = embedHtml.match(/"display_url"\s*:\s*"([^"]+)"/) || 
-                             embedHtml.match(/display_url\\":\s*\\?"([^"]+)\\?"/) ||
-                             embedHtml.match(/class="EmbeddedMediaImage"[^>]+src="([^"]+)"/) ||
-                             embedHtml.match(/thumbnail_src\\":\s*\\?"([^"]+)\\?"/) ||
-                             embedHtml.match(/<img[^>]+src="([^"]+)"/);
-        if (displayMatch && displayMatch[1]) {
-          embedImage = cleanInstagramText(displayMatch[1]);
+        // 2. Carousel / Display Images: extract ALL display_url occurrences
+        const displayRegex = /"display_url"\s*:\s*"([^"]+)"/g;
+        let dMatch: RegExpExecArray | null;
+        while ((dMatch = displayRegex.exec(embedHtml)) !== null) {
+          const dUrl = cleanInstagramText(dMatch[1]);
+          if (dUrl && !isAvatarUrl(dUrl)) {
+            discoveredImageUrls.push(dUrl);
+          }
         }
 
-        // Username
-        const usernameMatch = embedHtml.match(/"username"\s*:\s*"([^"]+)"/) || embedHtml.match(/class="UsernameText"[^>]*>([^<]+)/);
+        // 3. Fallback to EmbeddedMediaImage class or thumbnail_src
+        const $embed = cheerio.load(embedHtml);
+        $embed('img.EmbeddedMediaImage, img[src*="cdninstagram"], img[src*="fbcdn"]').each((_, el) => {
+          const src = $embed(el).attr('src');
+          if (src && !isAvatarUrl(src)) {
+            discoveredImageUrls.push(cleanInstagramText(src));
+          }
+        });
+
+        // 4. Extract display_resources candidates if present
+        const resRegex = /"src"\s*:\s*"([^"]+(?:cdninstagram\.com|fbcdn\.net)[^"]+)"/g;
+        let rMatch: RegExpExecArray | null;
+        while ((rMatch = resRegex.exec(embedHtml)) !== null) {
+          const rUrl = cleanInstagramText(rMatch[1]);
+          if (rUrl && !isAvatarUrl(rUrl)) {
+            discoveredImageUrls.push(rUrl);
+          }
+        }
+
+        // 5. Username
+        const usernameMatch =
+          embedHtml.match(/"username"\s*:\s*"([^"]+)"/) ||
+          embedHtml.match(/class="UsernameText"[^>]*>([^<]+)/);
         if (usernameMatch && usernameMatch[1] && username === 'unknown') {
           username = cleanInstagramText(usernameMatch[1]);
           if (displayName === 'Instagram User' || displayName === 'Instagram Post') {
@@ -128,16 +169,19 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
           }
         }
 
-        // Avatar
-        const avatarMatch = embedHtml.match(/"profile_pic_url"\s*:\s*"([^"]+)"/) || embedHtml.match(/class="Avatar[^"]*"[^>]+src="([^"]+)"/);
+        // 6. Avatar
+        const avatarMatch =
+          embedHtml.match(/"profile_pic_url"\s*:\s*"([^"]+)"/) ||
+          embedHtml.match(/class="Avatar[^"]*"[^>]+src="([^"]+)"/);
         if (avatarMatch && avatarMatch[1]) {
           embedAvatar = cleanInstagramText(avatarMatch[1]);
         }
 
-        // Caption Text
-        const captionMatch = embedHtml.match(/class="CaptionText"[^>]*>([\s\S]*?)<\/div>/) || 
-                             embedHtml.match(/class="Caption"[^>]*>([\s\S]*?)<\/div>/) ||
-                             embedHtml.match(/"caption"\s*:\s*\{"text"\s*:\s*"([^"]+)"\}/);
+        // 7. Caption Text
+        const captionMatch =
+          embedHtml.match(/class="CaptionText"[^>]*>([\s\S]*?)<\/div>/) ||
+          embedHtml.match(/class="Caption"[^>]*>([\s\S]*?)<\/div>/) ||
+          embedHtml.match(/"caption"\s*:\s*\{"text"\s*:\s*"([^"]+)"\}/);
         if (captionMatch && captionMatch[1] && (!description || description.trim() === '')) {
           description = cleanInstagramText(captionMatch[1]);
         }
@@ -146,24 +190,21 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
       }
     }
 
-    const finalSnapshot = image || embedImage || null;
-
-    // Construct media list with direct video URL and/or image snapshot
-    const mediaList: MediaItem[] = [];
-
-    if (videoUrl) {
-      mediaList.push({
-        type: 'video',
-        url: videoUrl,
-      });
+    // Also include image from Cheerio if not already included
+    if (image && !isAvatarUrl(image)) {
+      discoveredImageUrls.unshift(image);
     }
 
-    if (finalSnapshot) {
-      mediaList.push({
-        type: 'image',
-        url: finalSnapshot,
-      });
-    }
+    // Deduplicate all discovered carousel images
+    const uniqueImages = Array.from(new Set(discoveredImageUrls));
+    uniqueImages.forEach((url) => {
+      if (!mediaList.some((m) => m.url === url)) {
+        mediaList.push({ type: 'image', url });
+      }
+    });
+
+    const finalSnapshot =
+      mediaList.find((m) => m.type === 'image')?.url || mediaList[0]?.url || image || null;
 
     const card_data: InstagramCardData = {
       author: {
@@ -177,11 +218,50 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
       posted_at: publishedAt || new Date().toISOString(),
     };
 
+    // If Cheerio and embed returned nothing useful (e.g. login wall / blocked), fallback to optimized Playwright
+    if (!finalSnapshot && (!description || description.trim() === '') && (title === 'Instagram Post' || !title)) {
+      try {
+        const pwData = await playwrightEngine.scrape(targetUrl, {
+          waitSelector: 'article, main',
+          waitTimeout: 2500,
+        });
+
+        if (pwData.title || pwData.description || pwData.snapshot) {
+          const pwMedia: MediaItem[] = pwData.snapshot ? [{ type: 'image', url: pwData.snapshot }] : mediaList;
+          return {
+            title: pwData.title || 'Instagram Post',
+            description: pwData.description || '',
+            snapshot: pwData.snapshot || finalSnapshot,
+            logo: INSTAGRAM_LOGO_URL,
+            ogSiteName,
+            card_data: {
+              author: {
+                username,
+                name: pwData.author || displayName,
+                avatar_url: cheerioData?.authorAvatar || embedAvatar || null,
+                verified: false,
+              },
+              metrics,
+              media: pwMedia,
+              posted_at: pwData.publishedAt || publishedAt || new Date().toISOString(),
+            },
+          };
+        }
+      } catch {
+        // Fallback to default return
+      }
+    }
+
     return {
-      title: title && title !== 'Instagram Post' ? title : (username !== 'unknown' ? `Post by @${username} on Instagram` : 'Instagram Post'),
+      title:
+        title && title !== 'Instagram Post'
+          ? title
+          : username !== 'unknown'
+          ? `Post by @${username} on Instagram`
+          : 'Instagram Post',
       description: description || '',
       snapshot: finalSnapshot,
-      logo,
+      logo: INSTAGRAM_LOGO_URL,
       ogSiteName,
       card_data,
     };

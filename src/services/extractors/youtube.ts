@@ -146,15 +146,7 @@ export const youtubeExtractor: PlatformExtractor<YouTubeCardData> = {
     try {
       const pwData = await playwrightEngine.scrape(targetUrl, {
         waitSelector: '#ytd-player, ytd-watch-flexy, #movie_player, main',
-        waitTimeout: 6000,
-        containerSelectors: [
-          '#ytd-player',
-          'ytd-watch-flexy',
-          '#movie_player',
-          'article',
-          '[role="main"]',
-          'main',
-        ],
+        waitTimeout: 2000,
       });
 
       return {

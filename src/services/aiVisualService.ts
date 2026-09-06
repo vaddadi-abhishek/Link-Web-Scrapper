@@ -39,11 +39,16 @@ async function fetchImageAsInlineData(imageUrl: string): Promise<{ mimeType: str
   }
 
   try {
+    const isFacebookOrMeta = imageUrl.includes('fbsbx.com') || imageUrl.includes('facebook.com') || imageUrl.includes('fbcdn.net');
+    const userAgent = isFacebookOrMeta
+      ? 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)'
+      : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+
     const response = await axios.get(imageUrl, {
       responseType: 'arraybuffer',
       timeout: 8000,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'User-Agent': userAgent,
         'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
       },
     });
@@ -136,16 +141,18 @@ function buildFallbackAnalysis(input: AIVisualAnalysisInput, reason?: string): A
   }
 
   const fallbackContext = parts.length > 0
-    ? `Visual & Content Context: ${parts.join(' | ')}.${reason ? ` (${reason})` : ''}`
-    : `Saved bookmark from ${input.site_name || input.url}.`;
+    ? `Content Summary: ${parts.join(' | ')}.`
+    : `Saved link from ${input.site_name || input.url}.`;
 
   return {
     ai_context: fallbackContext,
-    ai_tags: Array.from(tagsSet).slice(0, 8),
+    ai_tags: Array.from(tagsSet).slice(0, 10),
+    visual_entities: [],
+    ocr_text: '',
   };
 }
 
-const CANDIDATE_MODELS = ['gemini-3.5-flash', 'gemini-3.7-flash', 'gemini-flash-latest', 'gemini-3.8-flash'];
+const CANDIDATE_MODELS = ['gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-3.8-flash', 'gemini-flash-latest'];
 
 /**
  * Main AI Visual & Video Intelligence Analyzer using Google Gemini Multimodal Vision API

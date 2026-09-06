@@ -53,7 +53,7 @@ export interface FacebookCardData {
 export interface LinkedInCardData {
   author: {
     name: string;
-    headline: string;
+    headline?: string | null;
     avatar_url: string | null;
   };
   metrics: {
@@ -61,6 +61,7 @@ export interface LinkedInCardData {
     comments?: number;
     reposts?: number;
   };
+  media: MediaItem[];
   posted_at: string | null;
 }
 

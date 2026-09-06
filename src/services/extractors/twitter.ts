@@ -1,154 +1,301 @@
-import { PlatformExtractor, ExtractionResult, XCardData } from './types';
-import { resolveUrl } from '../../utils/urlFormatter';
 import axios from 'axios';
+import { PlatformExtractor, ExtractionResult, XCardData, MediaItem } from './types';
+import { resolveUrl } from '../../utils/urlFormatter';
+import { scrapeWithCheerio } from '../cheerioScraper';
+import { playwrightEngine } from '../playwrightEngine';
+import { cleanTitle, cleanDescription } from '../../utils/textCleaner';
 
-const BEARER_TOKEN = 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA';
+function extractTweetId(url: string): string | null {
+  const match = url.match(/(?:status|statuses)\/(\d+)/i);
+  return match && match[1] ? match[1] : null;
+}
 
-let cachedGuestToken: string | null = null;
-let guestTokenExpiry: number = 0;
+const X_LOGO_URL = 'https://abs.twimg.com/favicons/twitter.3.ico';
 
-const getGuestToken = async (): Promise<string | null> => {
-  if (cachedGuestToken && Date.now() < guestTokenExpiry) {
-    return cachedGuestToken;
-  }
+// -------------------------------------------------------------
+// Tier 1: Open APIs for X (Twitter)
+// -------------------------------------------------------------
+async function tryFxTwitterApi(tweetId: string, targetUrl: string): Promise<ExtractionResult<XCardData> | null> {
   try {
-    const res = await axios.post('https://api.twitter.com/1.1/guest/activate.json', {}, {
+    const res = await axios.get(`https://api.fxtwitter.com/status/${tweetId}`, {
+      timeout: 2000,
       headers: {
-        'authorization': BEARER_TOKEN,
+        'Accept': 'application/json',
+        'User-Agent': 'TaggerApp/1.0',
       },
-      timeout: 3000,
-    });
-    if (res.data && res.data.guest_token) {
-      cachedGuestToken = res.data.guest_token;
-      guestTokenExpiry = Date.now() + 20 * 60 * 1000; // cache for 20 minutes
-      return cachedGuestToken;
-    }
-  } catch {
-    // Return null if guest token activation fails
-  }
-  return null;
-};
-
-const extractVideoUrl = (item: any): string | null => {
-  if (!item) return null;
-  const variants = item.video_info?.variants || item.variants;
-  if (!Array.isArray(variants) || variants.length === 0) return null;
-
-  const mp4Variants = variants
-    .filter((v: any) => (v.content_type === 'video/mp4' || v.type === 'video/mp4') && (v.url || v.src))
-    .sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0));
-
-  if (mp4Variants.length > 0) {
-    return mp4Variants[0].url || mp4Variants[0].src || null;
-  }
-
-  const anyVariant = variants.find((v: any) => v.url || v.src);
-  return anyVariant?.url || anyVariant?.src || null;
-};
-
-export const twitterExtractor: PlatformExtractor<XCardData> = {
-  platformKey: 'x',
-  async extract(targetUrl: string): Promise<ExtractionResult<XCardData>> {
-    const tweetMatch = targetUrl.match(/\/status\/(\d+)/i);
-    if (!tweetMatch || !tweetMatch[1]) {
-      throw new Error('Invalid X/Twitter status URL');
-    }
-
-    const tweetId = tweetMatch[1];
-    const guestToken = await getGuestToken();
-    if (!guestToken) {
-      throw new Error('Failed to retrieve Twitter guest token');
-    }
-
-    const synRes = await axios.get(`https://cdn.syndication.twimg.com/tweet-result?id=${tweetId}&token=${guestToken}`, {
-      timeout: 4000,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-      },
+      validateStatus: (status) => status === 200,
     });
 
-    const data = synRes.data;
-    if (!data || !data.user) {
-      throw new Error('Tweet data not found or returned empty payload');
+    const tweet = res.data?.tweet;
+    if (!tweet || !tweet.author) {
+      return null;
     }
 
-    const authorName = data.user.name || 'User Display Name';
-    const handle = data.user.screen_name ? `@${data.user.screen_name}` : '@username';
+    const authorName = tweet.author.name || 'User';
+    const handle = tweet.author.screen_name ? `@${tweet.author.screen_name}` : '@user';
     const title = `${authorName} (${handle}) on X`;
-    const description = data.text || '';
+    const description = tweet.text || '';
 
-    // Map all attached images/videos from mediaDetails or photos
-    const mediaList: Array<{ type: 'image' | 'video'; url: string }> = [];
-
-    if (Array.isArray(data.mediaDetails) && data.mediaDetails.length > 0) {
-      data.mediaDetails.forEach((item: any) => {
-        if (!item) return;
-        const isVideo = item.type === 'video' || item.type === 'animated_gif';
-        if (isVideo) {
-          const videoUrl = extractVideoUrl(item);
-          if (videoUrl) {
-            mediaList.push({ type: 'video', url: videoUrl });
-          } else if (item.media_url_https) {
-            mediaList.push({ type: 'video', url: item.media_url_https });
-          }
-        } else if (item.media_url_https) {
-          mediaList.push({ type: 'image', url: item.media_url_https });
-        }
-      });
-    } else if (Array.isArray(data.photos) && data.photos.length > 0) {
-      data.photos.forEach((photo: any) => {
-        if (photo && photo.url) {
+    const mediaList: MediaItem[] = [];
+    if (Array.isArray(tweet.media?.photos)) {
+      tweet.media.photos.forEach((photo: any) => {
+        if (photo?.url) {
           mediaList.push({ type: 'image', url: photo.url });
         }
       });
     }
-
-    if (mediaList.length === 0 && data.video) {
-      const videoUrl = extractVideoUrl(data.video);
-      if (videoUrl) {
-        mediaList.push({ type: 'video', url: videoUrl });
-      }
+    if (Array.isArray(tweet.media?.videos)) {
+      tweet.media.videos.forEach((video: any) => {
+        if (video?.url || video?.thumbnail_url) {
+          mediaList.push({
+            type: 'video',
+            url: video.url || video.thumbnail_url,
+          });
+        }
+      });
     }
 
-    const snapshot = data.photos?.[0]?.url || data.mediaDetails?.[0]?.media_url_https || data.video?.poster || mediaList[0]?.url || null;
+    const snapshot =
+      mediaList[0]?.url ||
+      tweet.media?.photos?.[0]?.url ||
+      tweet.media?.videos?.[0]?.thumbnail_url ||
+      null;
 
-    // Dynamically construct metrics object containing ONLY available non-null/non-undefined fields
     const metrics: XCardData['metrics'] = {};
+    if (tweet.replies !== undefined && tweet.replies !== null) metrics.replies = tweet.replies;
+    if (tweet.retweets !== undefined && tweet.retweets !== null) metrics.reposts = tweet.retweets;
+    if (tweet.likes !== undefined && tweet.likes !== null) metrics.likes = tweet.likes;
+    if (tweet.views !== undefined && tweet.views !== null) metrics.views = tweet.views;
+    if (tweet.bookmarks !== undefined && tweet.bookmarks !== null) metrics.bookmarks = tweet.bookmarks;
 
-    if (data.conversation_count !== undefined && data.conversation_count !== null) {
-      metrics.replies = data.conversation_count;
-    }
-    if (data.retweet_count !== undefined && data.retweet_count !== null) {
-      metrics.reposts = data.retweet_count;
-    }
-    if (data.favorite_count !== undefined && data.favorite_count !== null) {
-      metrics.likes = data.favorite_count;
-    }
-    const viewCount = data.views_count ?? data.views?.count;
-    if (viewCount !== undefined && viewCount !== null) {
-      metrics.views = viewCount;
-    }
-    if (data.bookmark_count !== undefined && data.bookmark_count !== null) {
-      metrics.bookmarks = data.bookmark_count;
-    }
+    const postedAt = tweet.created_at
+      ? new Date(tweet.created_at).toISOString()
+      : new Date().toISOString();
 
     return {
       title,
       description,
       snapshot,
-      logo: data.user.profile_image_url_https || resolveUrl('/favicon.ico', targetUrl),
+      logo: X_LOGO_URL,
       ogSiteName: 'X (formerly Twitter)',
       card_data: {
         author: {
           name: authorName,
           handle,
-          avatar_url: data.user.profile_image_url_https || null,
-          verified: Boolean(data.user.verified || data.user.is_blue_verified)
+          avatar_url: tweet.author.avatar_url || null,
+          verified: Boolean(tweet.author.verification?.verified),
         },
         metrics,
         media: mediaList,
-        posted_at: data.created_at ? new Date(data.created_at).toISOString() : new Date().toISOString()
-      }
+        posted_at: postedAt,
+      },
     };
+  } catch {
+    return null;
+  }
+}
+
+async function tryVxTwitterApi(tweetId: string, targetUrl: string): Promise<ExtractionResult<XCardData> | null> {
+  try {
+    const res = await axios.get(`https://api.vxtwitter.com/Twitter/status/${tweetId}`, {
+      timeout: 2000,
+      headers: {
+        'Accept': 'application/json',
+      },
+      validateStatus: (status) => status === 200,
+    });
+
+    const data = res.data;
+    if (!data || !data.user_name) {
+      return null;
+    }
+
+    const authorName = data.user_name;
+    const handle = data.user_screen_name ? `@${data.user_screen_name}` : '@user';
+    const title = `${authorName} (${handle}) on X`;
+    const description = data.text || '';
+
+    const mediaList: MediaItem[] = [];
+    if (Array.isArray(data.media_extended)) {
+      data.media_extended.forEach((item: any) => {
+        if (item?.url) {
+          mediaList.push({
+            type: item.type === 'video' || item.type === 'gif' ? 'video' : 'image',
+            url: item.url,
+          });
+        }
+      });
+    } else if (Array.isArray(data.mediaURLs)) {
+      data.mediaURLs.forEach((u: string) => {
+        mediaList.push({ type: 'image', url: u });
+      });
+    }
+
+    const snapshot = mediaList[0]?.url || null;
+
+    const metrics: XCardData['metrics'] = {};
+    if (data.replies !== undefined && data.replies !== null) metrics.replies = data.replies;
+    if (data.retweets !== undefined && data.retweets !== null) metrics.reposts = data.retweets;
+    if (data.likes !== undefined && data.likes !== null) metrics.likes = data.likes;
+
+    return {
+      title,
+      description,
+      snapshot,
+      logo: X_LOGO_URL,
+      ogSiteName: 'X (formerly Twitter)',
+      card_data: {
+        author: {
+          name: authorName,
+          handle,
+          avatar_url: data.user_profile_image_url || null,
+          verified: false,
+        },
+        metrics,
+        media: mediaList,
+        posted_at: data.date ? new Date(data.date).toISOString() : new Date().toISOString(),
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function tryTwitterOEmbed(targetUrl: string): Promise<ExtractionResult<XCardData> | null> {
+  try {
+    const res = await axios.get(`https://publish.twitter.com/oembed?url=${encodeURIComponent(targetUrl)}`, {
+      timeout: 2000,
+    });
+    const data = res.data;
+    if (!data || !data.author_name) return null;
+
+    const rawText = (data.html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+
+    return {
+      title: `${data.author_name} on X`,
+      description: rawText,
+      snapshot: null,
+      logo: X_LOGO_URL,
+      ogSiteName: 'X (formerly Twitter)',
+      card_data: {
+        author: {
+          name: data.author_name,
+          handle: data.author_url ? `@${data.author_url.split('/').pop()}` : '@user',
+          avatar_url: null,
+          verified: false,
+        },
+        metrics: {},
+        media: [],
+        posted_at: new Date().toISOString(),
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+// -------------------------------------------------------------
+// Twitter / X Extractor with 3-Tier Fallback
+// -------------------------------------------------------------
+export const twitterExtractor: PlatformExtractor<XCardData> = {
+  platformKey: 'x',
+  async extract(targetUrl: string): Promise<ExtractionResult<XCardData>> {
+    const tweetId = extractTweetId(targetUrl);
+
+    // -----------------------------------------------------------
+    // Tier 1: Open APIs (FxTwitter -> VxTwitter -> Twitter oEmbed)
+    // -----------------------------------------------------------
+    if (tweetId) {
+      const fxResult = await tryFxTwitterApi(tweetId, targetUrl);
+      if (fxResult) return fxResult;
+
+      const vxResult = await tryVxTwitterApi(tweetId, targetUrl);
+      if (vxResult) return vxResult;
+    }
+
+    const oembedResult = await tryTwitterOEmbed(targetUrl);
+    if (oembedResult) return oembedResult;
+
+    // -----------------------------------------------------------
+    // Tier 2: Cheerio + Axios Fallback
+    // -----------------------------------------------------------
+    const cheerioData = await scrapeWithCheerio(targetUrl);
+    if (cheerioData && (cheerioData.title || cheerioData.description)) {
+      const title = cleanTitle(cheerioData.title) || 'Post on X';
+      const description = cleanDescription(cheerioData.description) || '';
+      const snapshot = cheerioData.image; // og:image or twitter:image
+      const logo = cheerioData.logo || resolveUrl('/favicon.ico', targetUrl);
+
+      return {
+        title,
+        description,
+        snapshot,
+        logo: X_LOGO_URL,
+        ogSiteName: cheerioData.ogSiteName || 'X (formerly Twitter)',
+        card_data: {
+          author: {
+            name: cheerioData.author || 'User',
+            handle: '@user',
+            avatar_url: cheerioData.authorAvatar || null,
+            verified: false,
+          },
+          metrics: {},
+          media: snapshot ? [{ type: 'image', url: snapshot }] : [],
+          posted_at: cheerioData.publishedAt || new Date().toISOString(),
+        },
+      };
+    }
+
+    // -----------------------------------------------------------
+    // Tier 3: Playwright Fallback (<2s, styles/images blocked)
+    // -----------------------------------------------------------
+    try {
+      const pwData = await playwrightEngine.scrape(targetUrl, {
+        waitSelector: 'article[data-testid="tweet"], article',
+        waitTimeout: 2500,
+      });
+
+      const title = pwData.title || 'Post on X';
+      const description = pwData.description || '';
+      const snapshot = pwData.snapshot; // og:image or twitter:image
+
+      return {
+        title,
+        description,
+        snapshot,
+        logo: X_LOGO_URL,
+        ogSiteName: pwData.ogSiteName || 'X (formerly Twitter)',
+        card_data: {
+          author: {
+            name: pwData.author || 'User',
+            handle: '@user',
+            avatar_url: null,
+            verified: false,
+          },
+          metrics: {},
+          media: snapshot ? [{ type: 'image', url: snapshot }] : [],
+          posted_at: pwData.publishedAt || new Date().toISOString(),
+        },
+      };
+    } catch {
+      return {
+        title: 'Post on X',
+        description: '',
+        snapshot: null,
+        logo: X_LOGO_URL,
+        ogSiteName: 'X (formerly Twitter)',
+        card_data: {
+          author: {
+            name: 'User',
+            handle: '@user',
+            avatar_url: null,
+            verified: false,
+          },
+          metrics: {},
+          media: [],
+          posted_at: new Date().toISOString(),
+        },
+      };
+    }
   },
 };
