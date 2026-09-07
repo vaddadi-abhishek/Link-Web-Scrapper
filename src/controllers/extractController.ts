@@ -43,7 +43,6 @@ export const extractMetadataController = async (req: Request, res: Response): Pr
       url,
       title: result.title !== undefined ? result.title : null,
       description: result.description || '',
-      snapshot: result.snapshot || null,
       logo: result.logo || null,
       site_name: siteName,
       card_data: result.card_data,

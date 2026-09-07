@@ -7,7 +7,7 @@ export interface ExtractionResponse {
   url: string;
   title: string;
   description: string;
-  snapshot: string | null;
+  snapshot?: string | null;
   logo: string | null;
   site_name: string;
   published_at: string | null;
@@ -33,7 +33,7 @@ export async function extractMetadata(rawUrl: string): Promise<ExtractionRespons
     url,
     title,
     description,
-    snapshot: result.snapshot,
+    snapshot: (result.card_data as any)?.snapshot || result.snapshot || null,
     logo: result.logo,
     site_name: siteName,
     published_at,

@@ -48,6 +48,19 @@ function isFacebookPostImage(url: string | null): boolean {
     return false;
   }
 
+  // Reject Facebook stickers, comment emojis, avatars, and profile pictures
+  if (
+    l.includes('t39.1997') || // Facebook stickers / comment emojis CDN
+    l.includes('t39.30808') || // Facebook profile pictures CDN
+    l.includes('/stickers/') ||
+    l.includes('sticker') ||
+    l.includes('emoji') ||
+    l.includes('120x120') ||
+    l.includes('100x100')
+  ) {
+    return false;
+  }
+
   // Reject HTML post or photo viewer pages on facebook.com
   if (l.includes('facebook.com') && !l.includes('fbcdn.net') && !l.includes('scontent') && !l.includes('fbsbx.com')) {
     return false;
@@ -574,9 +587,13 @@ export const facebookExtractor: PlatformExtractor<FacebookCardData> = {
         candidateImage = directVcImg.replace(/&amp;/g, '&');
       }
 
-      // Collect all legitimate post images from HTML
+      // Collect all legitimate post images from HTML (ignoring comments/comment forms)
       $('img').each((_, el) => {
-        const src = $(el).attr('src');
+        const $el = $(el);
+        if ($el.closest('[role="article"], [aria-label*="comment" i], form').length > 0) {
+          return;
+        }
+        const src = $el.attr('src');
         if (src && isFacebookPostImage(src) && !discoveredImages.includes(src)) {
           discoveredImages.push(src);
         }
@@ -667,6 +684,10 @@ export const facebookExtractor: PlatformExtractor<FacebookCardData> = {
 
               const imgs: string[] = [];
               document.querySelectorAll('img').forEach((img) => {
+                // Ignore comment section images and stickers
+                if (img.closest('[role="article"], [aria-label*="comment" i], form')) {
+                  return;
+                }
                 const src = (img as HTMLImageElement).src;
                 if (src) imgs.push(src);
               });
@@ -830,9 +851,10 @@ export const facebookExtractor: PlatformExtractor<FacebookCardData> = {
 
       // If direct scontent/fbcdn CDN images were resolved, strip any unresolved lookaside crawler URLs
       const hasDirectCdn = directImages.some((u) => u.includes('scontent') || u.includes('fbcdn.net'));
-      const finalImages = hasDirectCdn
+      const finalImages = (hasDirectCdn
         ? directImages.filter((u) => !u.includes('lookaside.fbsbx.com'))
-        : directImages;
+        : directImages
+      ).filter(isFacebookPostImage);
 
       media = finalImages.map((url) => ({
         type: 'image',

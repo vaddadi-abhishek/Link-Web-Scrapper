@@ -26,7 +26,7 @@ function extractNameFromUrlSlug(url: string): string | null {
   return null;
 }
 
-function isGhostOrProfileAvatar(url: string | null): boolean {
+function isGhostAvatar(url: string | null): boolean {
   if (!url) return true;
   const l = url.toLowerCase();
   return (
@@ -40,12 +40,23 @@ function isGhostOrProfileAvatar(url: string | null): boolean {
   );
 }
 
+function isExcludedPostMedia(url: string | null): boolean {
+  if (!url) return true;
+  const l = url.toLowerCase();
+  return (
+    isGhostAvatar(url) ||
+    l.includes('profile-displayphoto') ||
+    l.includes('profile-displaybackgroundimage') ||
+    l.includes('company-logo')
+  );
+}
+
 function parseLinkedInJsonLd(html: string): {
   authorName: string | null;
   authorAvatar: string | null;
-  authorHeadline: string | null;
   description: string | null;
   snapshot: string | null;
+  images: string[];
   videoUrl: string | null;
   publishedAt: string | null;
   reactions: number;
@@ -54,9 +65,9 @@ function parseLinkedInJsonLd(html: string): {
 } {
   let authorName: string | null = null;
   let authorAvatar: string | null = null;
-  let authorHeadline: string | null = null;
   let description: string | null = null;
   let snapshot: string | null = null;
+  const rawImages: string[] = [];
   let videoUrl: string | null = null;
   let publishedAt: string | null = null;
   let reactions = 0;
@@ -87,24 +98,34 @@ function parseLinkedInJsonLd(html: string): {
             authorAvatar = imgObj.url || imgObj.contentUrl || null;
           }
 
-          // Author Headline/Title
-          if (json.creator?.jobTitle || json.author?.jobTitle) {
-            authorHeadline = json.creator?.jobTitle || json.author?.jobTitle;
-          } else if (json.creator?.description || json.author?.description) {
-            authorHeadline = json.creator?.description || json.author?.description;
-          } else if (json.creator?.interactionStatistic?.userInteractionCount) {
-            authorHeadline = `${json.creator.interactionStatistic.userInteractionCount} followers`;
-          }
-
           if (json.datePublished || json.uploadDate) {
             publishedAt = json.datePublished || json.uploadDate;
           }
           if (json.description || json.articleBody || json.text) {
             description = json.description || json.articleBody || json.text;
           }
-          if (json.thumbnailUrl || (typeof json.image === 'string' ? json.image : json.image?.url)) {
-            snapshot = json.thumbnailUrl || (typeof json.image === 'string' ? json.image : json.image?.url);
+
+          // Extract multiple images from JSON-LD
+          if (Array.isArray(json.image)) {
+            json.image.forEach((img: any) => {
+              if (typeof img === 'string') {
+                rawImages.push(img);
+              } else if (img && typeof img === 'object') {
+                const u = img.url || img.contentUrl;
+                if (u && typeof u === 'string') rawImages.push(u);
+              }
+            });
+          } else if (typeof json.image === 'string') {
+            rawImages.push(json.image);
+          } else if (json.image && typeof json.image === 'object') {
+            const u = json.image.url || json.image.contentUrl;
+            if (u && typeof u === 'string') rawImages.push(u);
           }
+
+          if (json.thumbnailUrl && typeof json.thumbnailUrl === 'string') {
+            rawImages.push(json.thumbnailUrl);
+          }
+
           if (type === 'VideoObject' && json.contentUrl) {
             videoUrl = json.contentUrl;
             if (!snapshot && json.thumbnailUrl) {
@@ -128,31 +149,67 @@ function parseLinkedInJsonLd(html: string): {
       } catch {}
     });
 
-    // Fallback author avatar and headline from Cheerio HTML selectors
-    if (!authorAvatar || isGhostOrProfileAvatar(authorAvatar)) {
-      const delayedImg =
-        $('[data-delayed-url*="profile-displayphoto"]').attr('data-delayed-url') ||
-        $('.public-post-author-card img[src*="profile-displayphoto"]').attr('src') ||
-        $('.hue-web-entity__image[data-delayed-url]').attr('data-delayed-url') ||
-        null;
-      if (delayedImg && !isGhostOrProfileAvatar(delayedImg)) {
-        authorAvatar = delayedImg;
+    // Extract post images from HTML DOM (feedshare images)
+    $('img[data-delayed-url*="feedshare-image"], img[src*="feedshare-image"]').each((_, el) => {
+      const src = $(el).attr('data-delayed-url') || $(el).attr('src');
+      if (src && !isExcludedPostMedia(src)) {
+        rawImages.push(src);
       }
+    });
+
+    const ogImg = $('meta[property="og:image"]').attr('content') || $('meta[name="twitter:image"]').attr('content');
+    if (ogImg && !isExcludedPostMedia(ogImg)) {
+      rawImages.push(ogImg);
     }
 
-    if (!authorHeadline) {
-      const followersText = $('.public-post-author-card__followers').text().trim();
-      const subtitle = $('.public-post-author-card__subtitle, .feed-shared-actor__description, .update-components-actor__description').text().trim();
-      authorHeadline = subtitle || followersText || null;
+    // Author Avatar: extract strictly from post author containers, NEVER from commenters or global selectors
+    if (!authorAvatar || isGhostAvatar(authorAvatar)) {
+      const lockup = $('[data-test-id="main-feed-activity-card__entity-lockup"], .feed-shared-actor, .update-components-actor');
+      if (lockup.length > 0) {
+        const img = lockup.find('img').first();
+        const url = img.attr('data-delayed-url') || img.attr('src');
+        if (url && !isGhostAvatar(url)) {
+          authorAvatar = url;
+        }
+      }
+
+      if (!authorAvatar || isGhostAvatar(authorAvatar)) {
+        const authorCard = $('.public-post-author-card');
+        if (authorCard.length > 0) {
+          const entity = authorCard.find('img[src*="profile-displayphoto"], [data-delayed-url*="profile-displayphoto"], [role="img"]').first();
+          const url = entity.attr('data-delayed-url') || entity.attr('src');
+          if (url && !isGhostAvatar(url)) {
+            authorAvatar = url;
+          }
+        }
+      }
     }
   } catch {}
+
+  // Deduplicate and filter post images
+  const images: string[] = [];
+  const seenKeys = new Set<string>();
+  for (const img of rawImages) {
+    if (!img || isExcludedPostMedia(img)) continue;
+    const cleanUrl = img.replace(/&amp;/g, '&').trim();
+    const idMatch = cleanUrl.match(/\/feedshare-image[^\/]*\/([^\/?]+)/);
+    const key = idMatch ? idMatch[1] : cleanUrl.split('?')[0];
+    if (!seenKeys.has(key)) {
+      seenKeys.add(key);
+      images.push(cleanUrl);
+    }
+  }
+
+  if (images.length > 0) {
+    snapshot = images[0];
+  }
 
   return {
     authorName,
     authorAvatar,
-    authorHeadline,
     description,
     snapshot,
+    images,
     videoUrl,
     publishedAt,
     reactions,
@@ -166,9 +223,9 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
   async extract(targetUrl: string): Promise<ExtractionResult<LinkedInCardData>> {
     let authorName: string | null = null;
     let authorAvatar: string | null = null;
-    let authorHeadline: string | null = null;
     let description: string | null = null;
     let snapshot: string | null = null;
+    let extractedImages: string[] = [];
     let videoUrl: string | null = null;
     let publishedAt: string | null = null;
     let reactions = 0;
@@ -193,9 +250,9 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
         const parsed = parseLinkedInJsonLd(res.data);
         authorName = parsed.authorName;
         authorAvatar = parsed.authorAvatar;
-        authorHeadline = parsed.authorHeadline;
         description = parsed.description;
         snapshot = parsed.snapshot;
+        extractedImages = parsed.images;
         videoUrl = parsed.videoUrl;
         publishedAt = parsed.publishedAt;
         reactions = parsed.reactions;
@@ -232,9 +289,15 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
           userAgent: 'LinkedInBot/1.0 (sdk@linkedin.com)',
           customEvaluator: async (page) => {
             return await page.evaluate(() => {
+              const domImages: string[] = [];
+              document.querySelectorAll('img[src*="feedshare-image"], img[data-delayed-url*="feedshare-image"]').forEach((img: any) => {
+                const src = img.getAttribute('data-delayed-url') || img.src;
+                if (src) domImages.push(src);
+              });
               return {
                 html: document.documentElement.outerHTML,
                 title: document.title,
+                images: domImages,
               };
             });
           },
@@ -244,14 +307,18 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
           const parsed = parseLinkedInJsonLd(pwResult.customData.html);
           if (parsed.authorName) authorName = parsed.authorName;
           if (parsed.authorAvatar) authorAvatar = parsed.authorAvatar;
-          if (parsed.authorHeadline) authorHeadline = parsed.authorHeadline;
           if (parsed.description) description = parsed.description;
           if (parsed.snapshot) snapshot = parsed.snapshot;
+          if (parsed.images && parsed.images.length > 0) extractedImages = parsed.images;
           if (parsed.videoUrl) videoUrl = parsed.videoUrl;
           if (parsed.publishedAt) publishedAt = parsed.publishedAt;
           if (parsed.reactions) reactions = parsed.reactions;
           if (parsed.comments) comments = parsed.comments;
           if (parsed.reposts) reposts = parsed.reposts;
+        }
+
+        if (Array.isArray(pwResult.customData?.images) && extractedImages.length === 0) {
+          extractedImages = pwResult.customData.images;
         }
 
         if (!description) description = pwResult.description || null;
@@ -268,35 +335,36 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
     }
 
     // Fallback avatar if still not found
-    if (!authorAvatar || isGhostOrProfileAvatar(authorAvatar)) {
+    if (!authorAvatar || isGhostAvatar(authorAvatar)) {
       authorAvatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(authorName)}&background=0a66c2&color=fff&size=200&bold=true`;
-    }
-
-    // Fallback headline if not found
-    if (!authorHeadline) {
-      authorHeadline = 'Professional on LinkedIn';
     }
 
     // Assemble clean media list (Strictly post media: video or post snapshot, NO profile avatars or banners)
     if (videoUrl) {
       mediaList.push({ type: 'video', url: videoUrl });
     }
-    if (snapshot && !mediaList.some((m) => m.url === snapshot) && !isGhostOrProfileAvatar(snapshot)) {
+    for (const imgUrl of extractedImages) {
+      if (!mediaList.some((m) => m.url === imgUrl) && !isExcludedPostMedia(imgUrl)) {
+        mediaList.push({ type: 'image', url: imgUrl });
+      }
+    }
+    if (snapshot && !mediaList.some((m) => m.url === snapshot) && !isExcludedPostMedia(snapshot)) {
       mediaList.push({ type: 'image', url: snapshot });
     }
+
+    const primarySnapshot = (mediaList.find((m) => m.type === 'image')?.url || mediaList[0]?.url || snapshot) || null;
 
     const finalDescription = description ? cleanLinkedInText(cleanDescription(description)) : '';
 
     return {
       title: null, // Always keep title as null for LinkedIn
       description: finalDescription,
-      snapshot: snapshot || (mediaList[0] ? mediaList[0].url : null),
+      snapshot: primarySnapshot,
       logo: LINKEDIN_LOGO_URL,
       ogSiteName: 'LinkedIn',
       card_data: {
         author: {
           name: authorName,
-          headline: authorHeadline,
           avatar_url: authorAvatar,
         },
         metrics: {

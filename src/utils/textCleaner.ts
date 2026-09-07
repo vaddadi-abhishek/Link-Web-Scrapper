@@ -104,6 +104,26 @@ export function cleanTitle(rawTitle: string | null | undefined): string | null {
 }
 
 /**
+ * Normalizes multi-line text by trimming lines, removing trailing "Read more" UI artifacts,
+ * and collapsing consecutive blank lines into double newlines.
+ */
+export function normalizeParagraphs(text: string): string {
+  if (!text) return '';
+
+  return text
+    .replace(/\r\n/g, '\n')
+    // Remove trailing expansion UI buttons like "Read more", "Show more", "Show less", "See more", "...more"
+    .replace(/\s*(?:\.\.\.\s*)?(?:Read\s*more|Show\s*more|Show\s*less|See\s*more)\s*\.?\s*$/i, '')
+    // Split into lines, trim each line's leading/trailing spaces
+    .split('\n')
+    .map((line) => line.trim())
+    .join('\n')
+    // Collapse 3 or more consecutive newlines into a standard double newline (paragraph break)
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
  * Cleans extracted description string into clean text, preserving line breaks.
  */
 export function cleanDescription(rawDescription: string | null | undefined): string | null {
@@ -113,6 +133,8 @@ export function cleanDescription(rawDescription: string | null | undefined): str
   desc = stripEngagementHeader(desc);
   desc = stripOuterQuotes(desc);
   desc = removeDotSpam(desc);
+  desc = normalizeParagraphs(desc);
 
   return desc.trim() || null;
 }
+

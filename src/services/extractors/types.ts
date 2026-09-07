@@ -53,7 +53,6 @@ export interface FacebookCardData {
 export interface LinkedInCardData {
   author: {
     name: string;
-    headline?: string | null;
     avatar_url: string | null;
   };
   metrics: {
@@ -97,12 +96,13 @@ export interface GlobalWebCardData {
   published_at: string | null;
   site_name: string | null;
   type: string | null;
+  snapshot: string | null;
 }
 
 export interface ExtractionResult<T = any> {
   title: string | null;
   description: string | null;
-  snapshot: string | null;
+  snapshot?: string | null;
   logo: string | null;
   ogSiteName: string | null;
   card_data: T;

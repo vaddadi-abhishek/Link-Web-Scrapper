@@ -15,13 +15,15 @@ const buildGlobalCardData = (
   author: string | null,
   publishedAt: string | null,
   siteName: string | null,
-  type: string | null
+  type: string | null,
+  snapshot: string | null
 ): GlobalWebCardData => {
   return {
     author: author || null,
     published_at: publishedAt || null,
     site_name: siteName || null,
     type: type || 'website',
+    snapshot: snapshot || null,
   };
 };
 
@@ -33,17 +35,18 @@ export const globalWebExtractor: PlatformExtractor<GlobalWebCardData> = {
 
     // If Cheerio extracted a title, description, or image, return immediately without invoking Playwright
     if (cheerioData && (cheerioData.title || cheerioData.description || cheerioData.image)) {
+      const snap = cheerioData.image || null;
       return {
         title: cheerioData.title || fallbackTitle(targetUrl),
         description: cheerioData.description || '',
-        snapshot: cheerioData.image || null,
         logo: cheerioData.logo || resolveUrl('/favicon.ico', targetUrl),
         ogSiteName: cheerioData.ogSiteName,
         card_data: buildGlobalCardData(
           cheerioData.author,
           cheerioData.publishedAt,
           cheerioData.ogSiteName,
-          cheerioData.type
+          cheerioData.type,
+          snap
         ),
       };
     }
@@ -54,31 +57,33 @@ export const globalWebExtractor: PlatformExtractor<GlobalWebCardData> = {
         waitTimeout: 2000,
       });
 
+      const snap = pwData.snapshot || cheerioData?.image || null;
       return {
         title: pwData.title || cheerioData?.title || fallbackTitle(targetUrl),
         description: pwData.description || cheerioData?.description || '',
-        snapshot: pwData.snapshot || cheerioData?.image || null,
         logo: pwData.logo || cheerioData?.logo || resolveUrl('/favicon.ico', targetUrl),
         ogSiteName: pwData.ogSiteName || cheerioData?.ogSiteName || null,
         card_data: buildGlobalCardData(
           pwData.author || cheerioData?.author || null,
           pwData.publishedAt || cheerioData?.publishedAt || null,
           pwData.ogSiteName || cheerioData?.ogSiteName || null,
-          pwData.type || cheerioData?.type || null
+          pwData.type || cheerioData?.type || null,
+          snap
         ),
       };
     } catch {
+      const snap = cheerioData?.image || null;
       return {
         title: cheerioData?.title || fallbackTitle(targetUrl),
         description: cheerioData?.description || '',
-        snapshot: cheerioData?.image || null,
         logo: cheerioData?.logo || resolveUrl('/favicon.ico', targetUrl),
         ogSiteName: cheerioData?.ogSiteName || null,
         card_data: buildGlobalCardData(
           cheerioData?.author || null,
           cheerioData?.publishedAt || null,
           cheerioData?.ogSiteName || null,
-          cheerioData?.type || null
+          cheerioData?.type || null,
+          snap
         ),
       };
     }

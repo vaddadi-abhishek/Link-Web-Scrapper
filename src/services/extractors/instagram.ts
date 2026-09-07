@@ -22,6 +22,71 @@ function cleanInstagramText(raw: string | null): string {
     .trim();
 }
 
+function cleanMediaUrl(raw: string | null): string {
+  if (!raw) return '';
+  return raw
+    .replace(/[\\"]+$/, '')
+    .replace(/\\u0026/g, '&')
+    .replace(/&amp;/g, '&')
+    .replace(/\\\//g, '/')
+    .replace(/\\/g, '')
+    .trim();
+}
+
+function sanitizeDescription(raw: string | null, username?: string): string {
+  if (!raw) return '';
+  let desc = String(raw).trim();
+
+  // 1. If crawler format: "... on [Date]: "caption text"" or "... on Instagram: "caption text""
+  const crawlerQuoteMatch =
+    desc.match(/(?:.*?)\s+on\s+[A-Za-z]+\s+\d{1,2},?\s*\d{4}:\s*["“]([\s\S]*?)["”][.\s]*$/i) ||
+    desc.match(/on Instagram:\s*["“]([\s\S]*?)["”][.\s]*$/i) ||
+    desc.match(/:\s*["“]([\s\S]{3,})["”][.\s]*$/);
+  if (crawlerQuoteMatch && crawlerQuoteMatch[1]) {
+    desc = crawlerQuoteMatch[1].trim();
+  }
+
+  // 2. Remove trailing "View all ... comments" or "View more on Instagram"
+  desc = desc.replace(/\s*View all [\d,.]+[KMBkmb]? comments.*$/is, '').trim();
+  desc = desc.replace(/\s*View more on Instagram.*$/is, '').trim();
+
+  // 3. If it starts with username directly attached (e.g. "rajshamaniTomorrow 9:09 PM" or "rajshamani Tomorrow")
+  if (username && username !== 'unknown') {
+    const userRegex = new RegExp(`^@?${username}[:\\s-]*`, 'i');
+    desc = desc.replace(userRegex, '').trim();
+  }
+
+  return cleanInstagramText(desc);
+}
+
+function extractInstagramVideo(embedHtml: string, rawHtml?: string): string | null {
+  if (embedHtml) {
+    // 1. Check for video_url in JSON
+    const vMatch = embedHtml.match(/video_url["\\]*:\s*["\\]*(https?:[\\/]+[^"\s<>]+)/i);
+    if (vMatch && vMatch[1]) {
+      return cleanMediaUrl(vMatch[1]);
+    }
+
+    // 2. Direct .mp4 in embed (unescape all backslashes first)
+    const unescapedEmbed = embedHtml.replace(/\\u0026/g, '&').replace(/&amp;/g, '&').replace(/\\\//g, '/').replace(/\\/g, '');
+    const mp4Match = unescapedEmbed.match(/https?:\/\/[^"'\s<>]+?\.mp4(?:\?[^"'\s<>]+)?/i);
+    if (mp4Match && mp4Match[0]) {
+      return cleanMediaUrl(mp4Match[0]);
+    }
+  }
+
+  // 3. Check crawler HTML fallback
+  if (rawHtml) {
+    const unescapedCrawler = rawHtml.replace(/\\u0026/g, '&').replace(/&amp;/g, '&').replace(/\\\//g, '/').replace(/\\/g, '');
+    const cMp4Match = unescapedCrawler.match(/https?:\/\/[^"'\s<>]+?\.mp4(?:\?[^"'\s<>]+)?/i);
+    if (cMp4Match && cMp4Match[0]) {
+      return cleanMediaUrl(cMp4Match[0]);
+    }
+  }
+
+  return null;
+}
+
 function isAvatarUrl(url: string): boolean {
   const l = url.toLowerCase();
   return (
@@ -36,8 +101,11 @@ function isAvatarUrl(url: string): boolean {
 export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
   platformKey: 'instagram',
   async extract(targetUrl: string): Promise<ExtractionResult<InstagramCardData>> {
+    // Normalize /reels/ to /reel/ for consistent crawler and embed resolution
+    const normalizedUrl = targetUrl.replace(/\/reels\//i, '/reel/');
+
     // Fast-Path using Axios & Cheerio with Meta Crawler User-Agent (~200ms)
-    const cheerioData = await scrapeWithCheerio(targetUrl);
+    const cheerioData = await scrapeWithCheerio(normalizedUrl);
 
     let title = cheerioData?.title || null;
     let description = cheerioData?.description || null;
@@ -102,11 +170,11 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
     }
 
     // Extract Reel/Post video & carousel image URLs via Instagram embed fast-path
-    const shortcodeMatch = targetUrl.match(/\/(?:reel|reels|p|tv)\/([a-zA-Z0-9_-]+)/i);
+    const shortcodeMatch = normalizedUrl.match(/\/(?:reel|reels|p|tv)\/([a-zA-Z0-9_-]+)/i);
     const shortcode = shortcodeMatch ? shortcodeMatch[1] : null;
     const mediaList: MediaItem[] = [];
-    const discoveredImageUrls: string[] = [];
     let embedAvatar: string | null = null;
+    let embedHtml = '';
 
     if (shortcode) {
       try {
@@ -115,50 +183,92 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
             'User-Agent':
               'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
           },
-          timeout: 4500,
+          timeout: 6000,
         });
-        const embedHtml = String(embedRes.data || '');
-
-        // 1. Direct Video URLs (collect all videos)
-        const videoRegex = /"video_url"\s*:\s*"([^"]+)"/g;
-        let vMatch: RegExpExecArray | null;
-        while ((vMatch = videoRegex.exec(embedHtml)) !== null) {
-          const vUrl = cleanInstagramText(vMatch[1]);
-          if (vUrl && !mediaList.some((m) => m.url === vUrl)) {
-            mediaList.push({ type: 'video', url: vUrl });
-          }
-        }
-
-        // 2. Carousel / Display Images: extract ALL display_url occurrences
-        const displayRegex = /"display_url"\s*:\s*"([^"]+)"/g;
-        let dMatch: RegExpExecArray | null;
-        while ((dMatch = displayRegex.exec(embedHtml)) !== null) {
-          const dUrl = cleanInstagramText(dMatch[1]);
-          if (dUrl && !isAvatarUrl(dUrl)) {
-            discoveredImageUrls.push(dUrl);
-          }
-        }
-
-        // 3. Fallback to EmbeddedMediaImage class or thumbnail_src
+        embedHtml = String(embedRes.data || '');
         const $embed = cheerio.load(embedHtml);
-        $embed('img.EmbeddedMediaImage, img[src*="cdninstagram"], img[src*="fbcdn"]').each((_, el) => {
-          const src = $embed(el).attr('src');
-          if (src && !isAvatarUrl(src)) {
-            discoveredImageUrls.push(cleanInstagramText(src));
-          }
-        });
 
-        // 4. Extract display_resources candidates if present
-        const resRegex = /"src"\s*:\s*"([^"]+(?:cdninstagram\.com|fbcdn\.net)[^"]+)"/g;
-        let rMatch: RegExpExecArray | null;
-        while ((rMatch = resRegex.exec(embedHtml)) !== null) {
-          const rUrl = cleanInstagramText(rMatch[1]);
-          if (rUrl && !isAvatarUrl(rUrl)) {
-            discoveredImageUrls.push(rUrl);
+        // 1. Extract Carousel (edge_sidecar_to_children)
+        const sidecarIdx = embedHtml.indexOf('edge_sidecar_to_children');
+        if (sidecarIdx !== -1) {
+          const edgesIdx = embedHtml.indexOf('edges', sidecarIdx);
+          if (edgesIdx !== -1) {
+            let depth = 0;
+            let startArray = -1;
+            let arrayStr = '';
+            for (let i = edgesIdx; i < embedHtml.length; i++) {
+              if (embedHtml[i] === '[') {
+                if (depth === 0) startArray = i;
+                depth++;
+              } else if (embedHtml[i] === ']') {
+                depth--;
+                if (depth === 0) {
+                  arrayStr = embedHtml.substring(startArray, i + 1);
+                  break;
+                }
+              }
+            }
+            if (arrayStr) {
+              try {
+                const unescaped = arrayStr
+                  .replace(/\\"/g, '"')
+                  .replace(/\\\\/g, '\\')
+                  .replace(/\\\//g, '/');
+                const edges = JSON.parse(unescaped);
+                for (const edge of edges) {
+                  const node = edge.node;
+                  if (!node) continue;
+                  if (node.is_video && node.video_url) {
+                    mediaList.push({ type: 'video', url: cleanMediaUrl(node.video_url) });
+                  } else if (node.display_url) {
+                    mediaList.push({ type: 'image', url: cleanMediaUrl(node.display_url) });
+                  }
+                }
+              } catch {
+                // Regex fallback if JSON parse fails
+                const parts = arrayStr.split(/\\?"node\\?"\s*:\s*\{/);
+                for (let p = 1; p < parts.length; p++) {
+                  const part = parts[p];
+                  const isVideo = /"is_video"\s*:\s*true/i.test(part) || /\\"is_video\\"\s*:\s*true/i.test(part);
+                  if (isVideo) {
+                    const vm = part.match(/(?:video_url)["\\]*:\s*["\\]*(https?:[\\/]+[^"\s<>]+?\.mp4[^"\s<>]*)/i);
+                    if (vm) mediaList.push({ type: 'video', url: cleanMediaUrl(vm[1]) });
+                  } else {
+                    const dm = part.match(/(?:display_url)["\\]*:\s*["\\]*(https?:[\\/]+[^"\s<>]+)/i);
+                    if (dm) mediaList.push({ type: 'image', url: cleanMediaUrl(dm[1]) });
+                  }
+                }
+              }
+            }
           }
         }
 
-        // 5. Username
+        // 2. If not a carousel, extract Video or Single Image
+        if (mediaList.length === 0) {
+          const isVideoPost =
+            targetUrl.includes('/reel/') ||
+            targetUrl.includes('/reels/') ||
+            embedHtml.includes('"is_video":true') ||
+            embedHtml.includes('\\"is_video\\":true') ||
+            embedHtml.includes('video_url');
+
+          const videoUrl = extractInstagramVideo(embedHtml, (cheerioData as any)?.rawHtml);
+          if (videoUrl) {
+            mediaList.push({ type: 'video', url: videoUrl });
+          }
+
+          // Only extract single post image if this is NOT a video post
+          if (mediaList.length === 0 && !isVideoPost) {
+            const embedImg = $embed('.Content.EmbedFrame img.EmbeddedMediaImage, .Content.EmbedFrame .EmbeddedMedia img').attr('src');
+            if (embedImg) {
+              mediaList.push({ type: 'image', url: cleanMediaUrl(embedImg) });
+            } else if (image) {
+              mediaList.push({ type: 'image', url: cleanMediaUrl(image) });
+            }
+          }
+        }
+
+        // 3. Username & Display Name Fallback
         const usernameMatch =
           embedHtml.match(/"username"\s*:\s*"([^"]+)"/) ||
           embedHtml.match(/class="UsernameText"[^>]*>([^<]+)/);
@@ -169,48 +279,89 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
           }
         }
 
-        // 6. Avatar
-        const avatarMatch =
-          embedHtml.match(/"profile_pic_url"\s*:\s*"([^"]+)"/) ||
-          embedHtml.match(/class="Avatar[^"]*"[^>]+src="([^"]+)"/);
-        if (avatarMatch && avatarMatch[1]) {
-          embedAvatar = cleanInstagramText(avatarMatch[1]);
+        // 4. Clean Caption Extraction from Embed DOM (stripping username & comments links)
+        let embedCaption: string | null = null;
+        const $caption = $embed('.Caption').first().clone();
+        if ($caption.length > 0) {
+          $caption.find('.CaptionUsername, .CaptionComments, .HoverCard, [class*="Username"], [class*="Comment"], script, style').remove();
+          const cText = $caption.text().trim();
+          if (cText) {
+            embedCaption = cleanInstagramText(cText);
+          }
+        }
+        if (!embedCaption) {
+          const cText = $embed('.CaptionText').text().trim();
+          if (cText) {
+            embedCaption = cleanInstagramText(cText);
+          }
         }
 
-        // 7. Caption Text
-        const captionMatch =
-          embedHtml.match(/class="CaptionText"[^>]*>([\s\S]*?)<\/div>/) ||
-          embedHtml.match(/class="Caption"[^>]*>([\s\S]*?)<\/div>/) ||
-          embedHtml.match(/"caption"\s*:\s*\{"text"\s*:\s*"([^"]+)"\}/);
-        if (captionMatch && captionMatch[1] && (!description || description.trim() === '')) {
-          description = cleanInstagramText(captionMatch[1]);
+        if (embedCaption) {
+          description = embedCaption;
+        }
+
+        // 5. Metrics Extraction from Embed JSON & DOM
+        const likesCountMatch = embedHtml.match(/(?:edge_liked_by|edge_media_preview_like|like_count)["\\]*:\s*\{?["\\]*(?:count)?["\\]*:\s*(\d+)/i);
+        if (likesCountMatch && likesCountMatch[1] && (!metrics.likes || metrics.likes === 0)) {
+          metrics.likes = parseInt(likesCountMatch[1], 10);
+        }
+
+        const commentsCountMatch =
+          embedHtml.match(/(?:edge_media_to_comment|edge_media_to_parent_comment|comment_count)["\\]*:\s*\{?["\\]*(?:count)?["\\]*:\s*(\d+)/i) ||
+          $embed('.CaptionComments, .CaptionCommentsExpand').text().match(/([\d,.]+[KMBkmb]?)\s+comments?/i);
+        if (commentsCountMatch && commentsCountMatch[1] && (!metrics.comments || metrics.comments === 0)) {
+          metrics.comments = parseFormattedNumber(commentsCountMatch[1]);
+        }
+
+        // 6. Avatar from Embed Header
+        if (username !== 'unknown') {
+          const matchingAvatar = $embed(`.Header img[alt="${username}"], .CollabAvatar img[alt="${username}"]`).attr('src');
+          if (matchingAvatar) {
+            embedAvatar = cleanMediaUrl(matchingAvatar);
+          }
+        }
+        if (!embedAvatar) {
+          const headerAvatar = $embed('.Header .Avatar img, .Header a.Avatar img, .Header a.CollabAvatar img').last().attr('src');
+          if (headerAvatar) {
+            embedAvatar = cleanMediaUrl(headerAvatar);
+          }
         }
       } catch {
         // Fallback if embed fetch times out
       }
     }
 
-    // Also include image from Cheerio if not already included
-    if (image && !isAvatarUrl(image)) {
-      discoveredImageUrls.unshift(image);
+    // Fallback for Avatar: Fast Profile Fetch using crawler headers
+    if (!embedAvatar && username && username !== 'unknown') {
+      try {
+        const uRes = await axios.get(`https://www.instagram.com/${username}/`, {
+          headers: {
+            'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          },
+          timeout: 4000,
+        });
+        const $u = cheerio.load(uRes.data);
+        const userOgImg = $u('meta[property="og:image"]').attr('content');
+        if (userOgImg) {
+          embedAvatar = cleanMediaUrl(userOgImg);
+        }
+      } catch {
+        // Ignore user page fetch error
+      }
     }
 
-    // Deduplicate all discovered carousel images
-    const uniqueImages = Array.from(new Set(discoveredImageUrls));
-    uniqueImages.forEach((url) => {
-      if (!mediaList.some((m) => m.url === url)) {
-        mediaList.push({ type: 'image', url });
-      }
-    });
+    // Final clean pass on description to remove any residual prefixes/suffixes
+    description = sanitizeDescription(description, username);
 
     const finalSnapshot =
-      mediaList.find((m) => m.type === 'image')?.url || mediaList[0]?.url || image || null;
+      image || mediaList.find((m) => m.type === 'image')?.url || mediaList[0]?.url || null;
 
     const card_data: InstagramCardData = {
       author: {
         username,
         name: displayName,
-        avatar_url: cheerioData?.authorAvatar || embedAvatar || null,
+        avatar_url: embedAvatar || cheerioData?.authorAvatar || null,
         verified: false,
       },
       metrics,

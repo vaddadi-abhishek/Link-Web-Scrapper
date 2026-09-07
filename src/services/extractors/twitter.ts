@@ -75,7 +75,6 @@ async function tryFxTwitterApi(tweetId: string, targetUrl: string): Promise<Extr
     return {
       title,
       description,
-      snapshot,
       logo: X_LOGO_URL,
       ogSiteName: 'X (formerly Twitter)',
       card_data: {
@@ -141,7 +140,6 @@ async function tryVxTwitterApi(tweetId: string, targetUrl: string): Promise<Extr
     return {
       title,
       description,
-      snapshot,
       logo: X_LOGO_URL,
       ogSiteName: 'X (formerly Twitter)',
       card_data: {
@@ -174,7 +172,6 @@ async function tryTwitterOEmbed(targetUrl: string): Promise<ExtractionResult<XCa
     return {
       title: `${data.author_name} on X`,
       description: rawText,
-      snapshot: null,
       logo: X_LOGO_URL,
       ogSiteName: 'X (formerly Twitter)',
       card_data: {
@@ -229,7 +226,6 @@ export const twitterExtractor: PlatformExtractor<XCardData> = {
       return {
         title,
         description,
-        snapshot,
         logo: X_LOGO_URL,
         ogSiteName: cheerioData.ogSiteName || 'X (formerly Twitter)',
         card_data: {
@@ -262,7 +258,6 @@ export const twitterExtractor: PlatformExtractor<XCardData> = {
       return {
         title,
         description,
-        snapshot,
         logo: X_LOGO_URL,
         ogSiteName: pwData.ogSiteName || 'X (formerly Twitter)',
         card_data: {
@@ -281,7 +276,6 @@ export const twitterExtractor: PlatformExtractor<XCardData> = {
       return {
         title: 'Post on X',
         description: '',
-        snapshot: null,
         logo: X_LOGO_URL,
         ogSiteName: 'X (formerly Twitter)',
         card_data: {
