@@ -1,6 +1,7 @@
 import { chromium, Browser } from 'playwright';
 import { resolveUrl } from '../utils/urlFormatter';
 import { cleanTitle, cleanDescription } from '../utils/textCleaner';
+import { logger } from '../utils/logger';
 
 export interface PlaywrightExtractionResult<T = any> {
   title: string | null;
@@ -24,9 +25,29 @@ export interface PlaywrightScrapeOptions<T = any> {
   userAgent?: string;
   viewport?: { width: number; height: number };
   viewportOnly?: boolean;
+  includeHtml?: boolean;
   customEvaluator?: (page: import('playwright').Page) => Promise<T>;
 }
 
+const BLOCKED_RESOURCE_TYPES = new Set([
+  'stylesheet',
+  'image',
+  'media',
+  'font',
+  'ping',
+  'eventsource',
+  'websocket',
+  'manifest',
+]);
+
+const BLOCKED_TRACKER_PATTERNS = [
+  'google-analytics.com',
+  'googletagmanager.com',
+  'connect.facebook.net',
+  'doubleclick.net',
+  'clarity.ms',
+  'hotjar.com',
+];
 
 class PlaywrightEngine {
   private static instance: PlaywrightEngine;
@@ -43,34 +64,56 @@ class PlaywrightEngine {
     return PlaywrightEngine.instance;
   }
 
+  /**
+   * Retrieves or initializes the shared Chromium browser instance.
+   * Auto-recovers if the browser disconnected or crashed.
+   */
   private async getBrowser(): Promise<Browser> {
-    if (!this.browserPromise) {
-      this.browserPromise = chromium
-        .launch({
-          headless: true,
-          args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--disable-gpu',
-            '--disable-background-networking',
-            '--disable-background-timer-throttling',
-            '--disable-client-side-phishing-detection',
-            '--disable-default-apps',
-            '--disable-translate',
-            '--disable-sync',
-            '--metrics-recording-only',
-            '--blink-settings=imagesEnabled=false',
-            '--disable-extensions',
-            '--mute-audio',
-          ],
-        })
-        .catch((err) => {
-          this.browserPromise = null;
-          throw err;
-        });
+    if (this.browserPromise) {
+      try {
+        const existing = await this.browserPromise;
+        if (existing && existing.isConnected()) {
+          return existing;
+        }
+      } catch {
+        this.browserPromise = null;
+      }
+      this.browserPromise = null;
     }
+
+    this.browserPromise = chromium
+      .launch({
+        headless: true,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--disable-gpu',
+          '--disable-background-networking',
+          '--disable-background-timer-throttling',
+          '--disable-client-side-phishing-detection',
+          '--disable-default-apps',
+          '--disable-translate',
+          '--disable-sync',
+          '--metrics-recording-only',
+          '--blink-settings=imagesEnabled=false',
+          '--disable-extensions',
+          '--mute-audio',
+        ],
+      })
+      .then((browser) => {
+        browser.on('disconnected', () => {
+          logger.warn('PlaywrightEngine', 'Chromium disconnected. Will re-launch on next request.');
+          this.browserPromise = null;
+        });
+        return browser;
+      })
+      .catch((err) => {
+        this.browserPromise = null;
+        throw err;
+      });
+
     return this.browserPromise;
   }
 
@@ -91,22 +134,19 @@ class PlaywrightEngine {
     try {
       // Abort stylesheets, images, fonts, media, websockets, and trackers for ultra-fast rendering
       await page.route('**/*', (route) => {
-        const reqUrl = route.request().url().toLowerCase();
         const resourceType = route.request().resourceType();
-
-        const blockedTypes = ['stylesheet', 'image', 'media', 'font', 'ping', 'eventsource', 'websocket', 'manifest'];
-        if (
-          blockedTypes.includes(resourceType) ||
-          reqUrl.includes('google-analytics.com') ||
-          reqUrl.includes('googletagmanager.com') ||
-          reqUrl.includes('connect.facebook.net') ||
-          reqUrl.includes('doubleclick.net') ||
-          reqUrl.includes('clarity.ms') ||
-          reqUrl.includes('hotjar.com')
-        ) {
-          return route.abort();
+        if (BLOCKED_RESOURCE_TYPES.has(resourceType)) {
+          return route.abort().catch(() => {});
         }
-        return route.continue();
+
+        const reqUrl = route.request().url().toLowerCase();
+        for (const pattern of BLOCKED_TRACKER_PATTERNS) {
+          if (reqUrl.includes(pattern)) {
+            return route.abort().catch(() => {});
+          }
+        }
+
+        return route.continue().catch(() => {});
       });
 
       // Navigate to target URL with configurable or default timeout
@@ -129,7 +169,7 @@ class PlaywrightEngine {
       await page.waitForTimeout(100);
 
       // -------------------------------------------------------------
-      // DOM Metadata Extraction (No screenshotting logic)
+      // DOM Metadata Extraction
       // -------------------------------------------------------------
       const metaData = await page.evaluate(() => {
         const getMeta = (...namesOrProperties: string[]) => {
@@ -214,6 +254,9 @@ class PlaywrightEngine {
         }
       }
 
+      // Only serialize HTML if explicitly requested to avoid CPU & memory serialization churn
+      const html = options.includeHtml ? await page.content().catch(() => null) : null;
+
       return {
         title: cleanTitle(metaData.title),
         description: cleanDescription(metaData.description),
@@ -224,7 +267,7 @@ class PlaywrightEngine {
         authorAvatar: null,
         publishedAt: metaData.publishedAt,
         type: metaData.type,
-        html: await page.content().catch(() => null),
+        html,
         customData,
       };
     } finally {

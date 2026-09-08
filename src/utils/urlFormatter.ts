@@ -1,4 +1,8 @@
 /**
+ * URL normalization and resolution utilities.
+ */
+
+/**
  * Normalizes a raw input URL by adding scheme if missing and validating format.
  */
 export function normalizeUrl(rawUrl: string): string {
@@ -14,7 +18,7 @@ export function normalizeUrl(rawUrl: string): string {
   try {
     const parsed = new URL(formatted);
     return parsed.toString();
-  } catch (err) {
+  } catch {
     throw new Error(`Invalid URL format: ${rawUrl}`);
   }
 }
@@ -33,33 +37,7 @@ export function resolveUrl(relativeOrAbsolute: string | null | undefined, baseUr
 
   try {
     return new URL(trimmed, baseUrl).toString();
-  } catch (err) {
+  } catch {
     return null;
   }
 }
-
-/**
- * Determines whether a URL is a generic homepage rather than a deep resource link.
- */
-export function isHomepage(urlStr: string): boolean {
-  try {
-    const parsed = new URL(urlStr);
-    const pathname = parsed.pathname.replace(/\/+$/, '');
-    return pathname === '' || pathname === '/index.html' || pathname === '/index.php';
-  } catch (err) {
-    return false;
-  }
-}
-
-/**
- * Returns a fallback Google favicon URL for a given domain string.
- */
-export function getFallbackFavicon(targetUrl: string): string {
-  try {
-    const domain = new URL(targetUrl).hostname;
-    return `https://www.google.com/s2/favicons?domain=${domain}&sz=128`;
-  } catch {
-    return resolveUrl('/favicon.ico', targetUrl) || '/favicon.ico';
-  }
-}
-

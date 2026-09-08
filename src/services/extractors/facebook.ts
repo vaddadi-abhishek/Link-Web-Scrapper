@@ -4,6 +4,8 @@ import { PlatformExtractor, ExtractionResult, FacebookCardData, MediaItem } from
 import { playwrightEngine } from '../playwrightEngine';
 import { cleanDescription } from '../../utils/textCleaner';
 import { parseFormattedNumber } from '../../utils/numberParser';
+import { avatarCache } from '../../utils/cache';
+import { logger } from '../../utils/logger';
 
 const FACEBOOK_LOGO_URL = 'https://static.xx.fbcdn.net/rsrc.php/yD/r/d4ZIVX-5CUn.ico';
 
@@ -374,6 +376,12 @@ async function resolveFacebookAuthorAvatar(
   targetUrl: string,
   finalUrl?: string | null
 ): Promise<string> {
+  const cacheKey = `fb_${authorName}_${finalUrl || targetUrl}`;
+  const cached = avatarCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
   const candidates: string[] = [];
 
   // 1. From URLs: finalUrl or targetUrl
@@ -426,17 +434,23 @@ async function resolveFacebookAuthorAvatar(
     }
   }
 
-  const uniqueCandidates = Array.from(new Set(candidates)).filter(Boolean);
+  // Deduplicate and prioritize numeric IDs (best for Graph API), take top 2 to avoid waterfall delays
+  const uniqueCandidates = Array.from(new Set(candidates))
+    .filter(Boolean)
+    .sort((a, b) => (/^\d+$/.test(b) ? 1 : 0) - (/^\d+$/.test(a) ? 1 : 0))
+    .slice(0, 2);
 
   for (const slugOrId of uniqueCandidates) {
     // 1. Try public Graph API
     try {
       const gRes = await axios.get(
         `https://graph.facebook.com/${encodeURIComponent(slugOrId)}/picture?type=large&redirect=false`,
-        { timeout: 2500 }
+        { timeout: 2000 }
       );
       if (gRes.data?.data?.url && !gRes.data.data.is_silhouette) {
-        return gRes.data.data.url;
+        const resolved = gRes.data.data.url;
+        avatarCache.set(cacheKey, resolved);
+        return resolved;
       }
     } catch {}
 
@@ -450,18 +464,22 @@ async function resolveFacebookAuthorAvatar(
           'Accept-Language': 'en-US,en;q=0.9',
         },
         maxRedirects: 5,
-        timeout: 3000,
+        timeout: 2000,
       });
       const $ = cheerio.load(mRes.data);
       const ogImg = $('meta[property="og:image"]').attr('content') || $('meta[property="og:image:secure_url"]').attr('content');
       if (ogImg && (ogImg.includes('scontent') || ogImg.includes('fbcdn.net')) && !ogImg.includes('static')) {
-        return ogImg.replace(/&amp;/g, '&');
+        const resolved = ogImg.replace(/&amp;/g, '&');
+        avatarCache.set(cacheKey, resolved);
+        return resolved;
       }
     } catch {}
   }
 
   // Fallback to clean UI-Avatar
-  return `https://ui-avatars.com/api/?name=${encodeURIComponent(authorName)}&background=1877f2&color=fff&size=128&bold=true`;
+  const fallbackAvatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(authorName)}&background=1877f2&color=fff&size=128&bold=true`;
+  avatarCache.set(cacheKey, fallbackAvatar);
+  return fallbackAvatar;
 }
 
 export const facebookExtractor: PlatformExtractor<FacebookCardData> = {
@@ -844,9 +862,20 @@ export const facebookExtractor: PlatformExtractor<FacebookCardData> = {
         }
       });
 
+      // Deduplicate by media ID and bound parallel requests to top 6 images
+      const seenMediaIds = new Set<string>();
+      const candidateImagesToResolve = rawCandidateImages.filter((u) => {
+        const m = u.match(/media_id=(\d+)/i) || u.match(/fbid=(\d+)/i);
+        if (m && m[1]) {
+          if (seenMediaIds.has(m[1])) return false;
+          seenMediaIds.add(m[1]);
+        }
+        return true;
+      }).slice(0, 6);
+
       // Resolve direct scontent.*.fbcdn.net image links in parallel
       const directImages = await Promise.all(
-        rawCandidateImages.map((u) => resolveDirectFacebookCdnImage(u))
+        candidateImagesToResolve.map((u) => resolveDirectFacebookCdnImage(u))
       );
 
       // If direct scontent/fbcdn CDN images were resolved, strip any unresolved lookaside crawler URLs

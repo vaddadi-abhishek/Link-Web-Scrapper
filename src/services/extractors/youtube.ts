@@ -4,6 +4,8 @@ import { PlatformExtractor, ExtractionResult, YouTubeCardData } from './types';
 import { scrapeWithCheerio } from '../cheerioScraper';
 import { playwrightEngine } from '../playwrightEngine';
 import { resolveUrl } from '../../utils/urlFormatter';
+import { avatarCache } from '../../utils/cache';
+import { logger } from '../../utils/logger';
 
 function extractYouTubeVideoId(targetUrl: string): string | null {
   const match = targetUrl.match(
@@ -36,6 +38,11 @@ const buildYouTubeCardData = (
 
 async function fetchChannelAvatar(channelUrl: string): Promise<string | null> {
   if (!channelUrl) return null;
+  const cached = avatarCache.get(channelUrl);
+  if (cached !== undefined) {
+    return cached;
+  }
+
   try {
     const res = await axios.get(channelUrl, {
       headers: {
@@ -46,11 +53,15 @@ async function fetchChannelAvatar(channelUrl: string): Promise<string | null> {
       timeout: 3000,
     });
     const $ = cheerio.load(res.data);
-    return (
+    const avatar =
       $('meta[property="og:image"]').attr('content') ||
       $('meta[name="twitter:image"]').attr('content') ||
-      null
-    );
+      null;
+
+    if (avatar) {
+      avatarCache.set(channelUrl, avatar);
+    }
+    return avatar;
   } catch {
     return null;
   }

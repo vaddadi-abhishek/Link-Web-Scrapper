@@ -8,6 +8,8 @@ import { playwrightEngine } from '../playwrightEngine';
 
 const REDDIT_LOGO_URL = 'https://www.redditstatic.com/shreddit/assets/favicon/192x192.png';
 
+const REDDIT_IMAGE_EXT_REGEX = /\.(jpg|jpeg|png|gif|webp|heic|avif)(\?.*)?$/i;
+
 const GENERIC_REDDIT_DESC_PATTERNS = [
   'explore this post and more from',
   'reddit gives you the best',
@@ -82,7 +84,7 @@ export function isValidRedditPostImage(url: string | null | undefined): boolean 
     lower.includes('preview.redd.it') ||
     lower.includes('external-preview.redd.it');
 
-  const hasImageExtension = /\.(jpg|jpeg|png|gif|webp|heic|avif)(\?.*)?$/i.test(lower);
+  const hasImageExtension = REDDIT_IMAGE_EXT_REGEX.test(lower);
 
   return isRedditImageHost || hasImageExtension;
 }
@@ -302,7 +304,7 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
         const votesMatch = metaDesc.match(/([\d,.]+[KMBkmb]?)\s*votes?/i);
         if (votesMatch) upvotes = parseFormattedNumber(votesMatch[1]);
         const commentsMatch = metaDesc.match(/([\d,.]+[KMBkmb]?)\s*comments?/i);
-        if (commentsMatch) comments = parseFormattedNumber(commentsMatch[2]);
+        if (commentsMatch) comments = parseFormattedNumber(commentsMatch[1]);
 
         subredditName = extractSubreddit(canonicalUrl, h1Title || $('title').text());
       }

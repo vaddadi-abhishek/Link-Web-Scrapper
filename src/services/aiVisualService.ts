@@ -1,5 +1,7 @@
 import axios from 'axios';
 import { GoogleGenAI } from '@google/genai';
+import { aiCache } from '../utils/cache';
+import { logger } from '../utils/logger';
 
 export interface AIVisualAnalysisInput {
   url: string;
@@ -18,6 +20,15 @@ export interface AIVisualAnalysisResult {
   ocr_text?: string;
 }
 
+// Cached GoogleGenAI SDK client instance
+let cachedAiClient: { key: string; client: GoogleGenAI } | null = null;
+function getGenAIClient(apiKey: string): GoogleGenAI {
+  if (!cachedAiClient || cachedAiClient.key !== apiKey) {
+    cachedAiClient = { key: apiKey, client: new GoogleGenAI({ apiKey }) };
+  }
+  return cachedAiClient.client;
+}
+
 function isVideoUrl(url: string): boolean {
   if (!url) return false;
   const clean = url.toLowerCase().split('?')[0];
@@ -31,7 +42,8 @@ function isVideoUrl(url: string): boolean {
 }
 
 /**
- * Downloads image from URL and converts it to base64 with mimeType
+ * Downloads image from URL and converts it to base64 with mimeType.
+ * Bounded by maxContentLength (8MB) to prevent memory exhaustion.
  */
 async function fetchImageAsInlineData(imageUrl: string): Promise<{ mimeType: string; data: string } | null> {
   if (!imageUrl || typeof imageUrl !== 'string' || !imageUrl.startsWith('http') || isVideoUrl(imageUrl)) {
@@ -47,6 +59,7 @@ async function fetchImageAsInlineData(imageUrl: string): Promise<{ mimeType: str
     const response = await axios.get(imageUrl, {
       responseType: 'arraybuffer',
       timeout: 8000,
+      maxContentLength: 8 * 1024 * 1024,
       headers: {
         'User-Agent': userAgent,
         'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
@@ -59,7 +72,7 @@ async function fetchImageAsInlineData(imageUrl: string): Promise<{ mimeType: str
 
     // Reject non-image content types (e.g. video/mp4, text/html)
     if (!mimeType.startsWith('image/')) {
-      console.warn(`[AIVisualService] Skipping non-image response mimeType (${mimeType}) for ${imageUrl}`);
+      logger.warn('AIVisualService', `Skipping non-image response mimeType (${mimeType}) for ${imageUrl}`);
       return null;
     }
 
@@ -70,13 +83,13 @@ async function fetchImageAsInlineData(imageUrl: string): Promise<{ mimeType: str
       data: base64Data,
     };
   } catch (error) {
-    console.warn(`[AIVisualService] Failed to fetch image ${imageUrl.substring(0, 80)}...:`, (error as Error).message);
+    logger.warn('AIVisualService', `Failed to fetch image ${imageUrl.substring(0, 80)}...:`, (error as Error).message);
     return null;
   }
 }
 
 /**
- * Downloads video from URL and converts it to base64 with video/mp4 mimeType
+ * Downloads video from URL and converts it to base64 with video/mp4 mimeType.
  */
 async function fetchVideoAsInlineData(videoUrl: string): Promise<{ mimeType: string; data: string } | null> {
   if (!videoUrl || typeof videoUrl !== 'string' || !videoUrl.startsWith('http')) {
@@ -106,13 +119,13 @@ async function fetchVideoAsInlineData(videoUrl: string): Promise<{ mimeType: str
       data: base64Data,
     };
   } catch (error) {
-    console.warn(`[AIVisualService] Failed to fetch video ${videoUrl.substring(0, 80)}...:`, (error as Error).message);
+    logger.warn('AIVisualService', `Failed to fetch video ${videoUrl.substring(0, 80)}...:`, (error as Error).message);
     return null;
   }
 }
 
 /**
- * Heuristic fallback when GEMINI_API_KEY is absent, invalid, or API call fails
+ * Heuristic fallback when GEMINI_API_KEY is absent, invalid, or API call fails.
  */
 function buildFallbackAnalysis(input: AIVisualAnalysisInput, reason?: string): AIVisualAnalysisResult {
   const parts: string[] = [];
@@ -152,17 +165,32 @@ function buildFallbackAnalysis(input: AIVisualAnalysisInput, reason?: string): A
   };
 }
 
-const CANDIDATE_MODELS = ['gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-3.8-flash', 'gemini-flash-latest'];
+const CANDIDATE_MODELS = [
+  'gemini-3.6-flash',
+  'gemini-3.7-flash',
+  'gemini-3.8-flash',
+  'gemini-flash-latest',
+  'gemini-2.5-flash',
+];
 
 /**
- * Main AI Visual & Video Intelligence Analyzer using Google Gemini Multimodal Vision API
+ * Main AI Visual & Video Intelligence Analyzer using Google Gemini Multimodal Vision API.
+ * Integrated with in-memory LRU caching to avoid redundant API latency and quota consumption.
  */
 export async function analyzeVisualContext(input: AIVisualAnalysisInput): Promise<AIVisualAnalysisResult> {
   const apiKey = process.env.GEMINI_API_KEY;
 
   if (!apiKey || apiKey.trim() === '' || apiKey.includes('your_free_gemini_api_key')) {
-    console.log('[AIVisualService] GEMINI_API_KEY is missing or placeholder in .env. Please set a valid Google AI Studio API key.');
+    logger.info('AIVisualService', 'GEMINI_API_KEY is missing or placeholder in .env. Please set a valid Google AI Studio API key.');
     return buildFallbackAnalysis(input, 'AI Key not configured in .env');
+  }
+
+  // Check in-memory AI cache (1 hour TTL)
+  const cacheKey = `${input.url}::${input.title || ''}::${input.snapshot || ''}`;
+  const cachedResult = aiCache.get(cacheKey);
+  if (cachedResult) {
+    logger.debug('AIVisualService', `Cache hit for ${input.url}`);
+    return cachedResult;
   }
 
   // Platform Detection
@@ -179,26 +207,30 @@ export async function analyzeVisualContext(input: AIVisualAnalysisInput): Promis
   const isExplicitLoginWall =
     combinedMeta.includes('login • instagram') ||
     combinedMeta.includes('welcome back to instagram') ||
-    combinedMeta.includes('log in to instagram')
+    combinedMeta.includes('log in to instagram');
 
   const hasNoMedia = !input.snapshot && (!input.card_data || !Array.isArray(input.card_data.media) || input.card_data.media.length === 0);
 
   // Instagram Constraint: Instagram is 100% media-based. If Instagram has no media OR is an explicit login wall, skip Gemini API call.
   if (isInstagram && (isExplicitLoginWall || hasNoMedia)) {
-    console.log(`[AIVisualService] Instagram login wall / restricted media detected for "${input.url}". Skipping AI API call.`);
-    return {
+    logger.info('AIVisualService', `Instagram login wall / restricted media detected for "${input.url}". Skipping AI API call.`);
+    const res = {
       ai_context: null,
       ai_tags: ['instagram'],
     };
+    aiCache.set(cacheKey, res);
+    return res;
   }
 
-  // Non-Instagram Explicit Login Wall check (e.g. if explicitly redirected to a login page with 0 content text)
+  // Non-Instagram Explicit Login Wall check
   if (isExplicitLoginWall && !descText) {
-    console.log(`[AIVisualService] Login wall detected for "${input.url}". Skipping AI API call.`);
-    return {
+    logger.info('AIVisualService', `Login wall detected for "${input.url}". Skipping AI API call.`);
+    const res = {
       ai_context: null,
       ai_tags: [input.site_name?.toLowerCase().replace(/[^a-z0-9]/g, '') || input.type || 'bookmark'].filter(Boolean),
     };
+    aiCache.set(cacheKey, res);
+    return res;
   }
 
   try {
@@ -239,7 +271,7 @@ export async function analyzeVisualContext(input: AIVisualAnalysisInput): Promis
     const [videoPart, rawImageParts] = await Promise.all([videoPartProm, imagePartsProm]);
     const validImageParts = rawImageParts.filter((p): p is { mimeType: string; data: string } => p !== null);
 
-    console.log(`[AIVisualService] Starting Gemini Multimodal Analysis: video=${!!videoPart}, images=${validImageParts.length} for "${input.title || input.url}"`);
+    logger.info('AIVisualService', `Starting Gemini Multimodal Analysis: video=${!!videoPart}, images=${validImageParts.length} for "${input.title || input.url}"`);
 
     // 3. Construct prompt for Gemini Multimodal Video & Visual Intelligence
     const promptText = `
@@ -272,7 +304,7 @@ Return strictly valid JSON in this exact structure:
 `.trim();
 
     // 4. Invoke Gemini Model with candidate model fallback
-    const ai = new GoogleGenAI({ apiKey });
+    const ai = getGenAIClient(apiKey);
 
     // Prepare contents array for @google/genai SDK
     const contents: any[] = [];
@@ -305,7 +337,7 @@ Return strictly valid JSON in this exact structure:
 
     for (const modelName of CANDIDATE_MODELS) {
       try {
-        console.log(`[AIVisualService] Attempting generation with model: ${modelName}...`);
+        logger.debug('AIVisualService', `Attempting generation with model: ${modelName}...`);
         const response = await ai.models.generateContent({
           model: modelName,
           contents,
@@ -316,12 +348,12 @@ Return strictly valid JSON in this exact structure:
 
         if (response.text) {
           responseText = response.text;
-          console.log(`[AIVisualService] Successfully received response from ${modelName}!`);
+          logger.info('AIVisualService', `Successfully received response from ${modelName}!`);
           break;
         }
       } catch (err: any) {
         lastError = err;
-        console.warn(`[AIVisualService] Model ${modelName} failed:`, err?.message || err);
+        logger.warn('AIVisualService', `Model ${modelName} failed:`, err?.message || err);
       }
     }
 
@@ -333,7 +365,7 @@ Return strictly valid JSON in this exact structure:
     const cleanedJsonStr = responseText.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
     const parsed = JSON.parse(cleanedJsonStr);
 
-    return {
+    const result: AIVisualAnalysisResult = {
       ai_context: parsed.ai_context || buildFallbackAnalysis(input).ai_context,
       ai_tags: Array.isArray(parsed.ai_tags) && parsed.ai_tags.length > 0
         ? parsed.ai_tags
@@ -341,8 +373,13 @@ Return strictly valid JSON in this exact structure:
       visual_entities: Array.isArray(parsed.visual_entities) ? parsed.visual_entities : [],
       ocr_text: typeof parsed.ocr_text === 'string' ? parsed.ocr_text : '',
     };
+
+    // Store in cache
+    aiCache.set(cacheKey, result);
+
+    return result;
   } catch (err: any) {
-    console.error('[AIVisualService] Error during Gemini visual analysis:', err?.message || err);
+    logger.error('AIVisualService', 'Error during Gemini visual analysis:', err?.message || err);
     return buildFallbackAnalysis(input, `API Error: ${err?.message || 'Gemini processing failed'}`);
   }
 }

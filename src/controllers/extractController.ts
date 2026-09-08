@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import { dispatchExtraction } from '../services/extractors';
 import { deriveSiteName } from '../utils/siteName';
 import { validateUrlAgainstSSRF } from '../utils/ssrfValidator';
-import { analyzeVisualContext } from '../services/aiVisualService';
+import { logger } from '../utils/logger';
 
 const getUrlFromRequest = async (req: Request): Promise<string | null> => {
   const url = req.body?.url || req.query?.url;
@@ -28,7 +28,14 @@ export const extractMetadataController = async (req: Request, res: Response): Pr
     }
     
     const html = req.body?.html;
-    const { result, platform } = await dispatchExtraction(url, html);
+    const forceRefresh = Boolean(
+      req.body?.forceRefresh ||
+      req.body?.noCache ||
+      req.query?.forceRefresh === 'true' ||
+      req.query?.noCache === 'true'
+    );
+
+    const { result, platform, cached } = await dispatchExtraction(url, html, { forceRefresh });
     const siteName = deriveSiteName(url, result.ogSiteName);
 
     // AI Context invocation disabled during scraping for speed & optimization
@@ -50,8 +57,10 @@ export const extractMetadataController = async (req: Request, res: Response): Pr
       ai_tags: aiTags,
       visual_entities: visualEntities,
       ocr_text: ocrText,
+      ...(cached ? { cached: true } : {}),
     });
   } catch (error: any) {
+    logger.error('ExtractController', 'Extraction error:', error?.message || error);
     res.status(500).json({ error: error.message || 'Failed to extract metadata' });
   }
 };

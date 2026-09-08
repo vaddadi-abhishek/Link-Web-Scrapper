@@ -1,19 +1,28 @@
 import dns from 'dns';
 import { promisify } from 'util';
+import { dnsCache } from './cache';
 
 const lookup = promisify(dns.lookup);
 
 /**
  * Validates a URL to prevent Server-Side Request Forgery (SSRF)
  * Resolves the hostname and blocks any resolution to private, loopback, or internal IP addresses.
+ * Uses an in-memory TTL cache to eliminate redundant DNS lookups and avoid threadpool saturation.
  */
 export const validateUrlAgainstSSRF = async (urlString: string): Promise<boolean> => {
   try {
     const parsed = new URL(urlString);
-    const hostname = parsed.hostname;
+    const hostname = parsed.hostname.toLowerCase();
+
+    // Check cached resolution first
+    const cachedResult = dnsCache.get(hostname);
+    if (cachedResult !== undefined) {
+      return cachedResult;
+    }
 
     // Block obvious internal hosts early
     if (hostname === 'localhost' || hostname.endsWith('.local') || hostname.endsWith('.internal')) {
+      dnsCache.set(hostname, false);
       return false;
     }
     
@@ -27,11 +36,13 @@ export const validateUrlAgainstSSRF = async (urlString: string): Promise<boolean
 
     // Check if the resolved IP is an internal/private address
     if (isPrivateIP(address)) {
+      dnsCache.set(hostname, false);
       return false;
     }
 
+    dnsCache.set(hostname, true);
     return true;
-  } catch (error) {
+  } catch {
     // If URL is invalid or DNS resolution fails, block the request
     return false;
   }

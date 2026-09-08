@@ -5,6 +5,7 @@
 // Basic HTML Entity Unescaping
 export function unescapeHtml(text: string): string {
   if (!text) return '';
+  if (!text.includes('&') && !text.includes('\\')) return text;
   return text
     .replace(/&quot;/g, '"')
     .replace(/&apos;/g, "'")

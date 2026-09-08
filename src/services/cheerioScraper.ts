@@ -1,13 +1,9 @@
-import http from 'http';
-import https from 'https';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { resolveUrl } from '../utils/urlFormatter';
 import { cleanTitle, cleanDescription } from '../utils/textCleaner';
-
-// Reusable HTTP and HTTPS agents with Keep-Alive for fast TCP/TLS connection reuse
-const httpAgent = new http.Agent({ keepAlive: true });
-const httpsAgent = new https.Agent({ keepAlive: true });
+import { sharedHttpAgent, sharedHttpsAgent } from '../utils/httpClient';
+import { logger } from '../utils/logger';
 
 export interface CheerioExtractionResult {
   title: string | null;
@@ -149,8 +145,9 @@ export async function scrapeWithCheerio(targetUrl: string): Promise<CheerioExtra
 
     const response = await axios.get(targetUrl, {
       timeout: 2500,
-      httpAgent,
-      httpsAgent,
+      maxContentLength: 5 * 1024 * 1024,
+      httpAgent: sharedHttpAgent,
+      httpsAgent: sharedHttpsAgent,
       headers: {
         'User-Agent': userAgent,
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -303,8 +300,8 @@ export async function scrapeWithCheerio(targetUrl: string): Promise<CheerioExtra
       publishedAt,
       type,
     };
-  } catch (error) {
-    console.error(`[cheerioScraper] Error scraping ${targetUrl}:`, error);
+  } catch (error: any) {
+    logger.warn('CheerioScraper', `Error scraping ${targetUrl}:`, error?.message || error);
     return null;
   }
 }
