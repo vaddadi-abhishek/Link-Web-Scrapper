@@ -1,6 +1,8 @@
 import axios from 'axios';
+import sharp from 'sharp';
 import { GoogleGenAI } from '@google/genai';
 import { aiCache } from '../utils/cache';
+import { canonicalizeUrl } from '../utils/urlFormatter';
 import { logger } from '../utils/logger';
 
 export interface AIVisualAnalysisInput {
@@ -11,6 +13,7 @@ export interface AIVisualAnalysisInput {
   site_name?: string;
   type?: string;
   card_data?: any;
+  forceRefresh?: boolean;
 }
 
 export interface AIVisualAnalysisResult {
@@ -42,8 +45,9 @@ function isVideoUrl(url: string): boolean {
 }
 
 /**
- * Downloads image from URL and converts it to base64 with mimeType.
- * Bounded by maxContentLength (8MB) to prevent memory exhaustion.
+ * Downloads image from URL, resizes/downscales to max 768px using sharp,
+ * and converts to compressed JPEG (quality 70%) base64.
+ * Drastically cuts token usage (1 tile, ~258 tokens) and payload size (down to 20-50KB).
  */
 async function fetchImageAsInlineData(imageUrl: string): Promise<{ mimeType: string; data: string } | null> {
   if (!imageUrl || typeof imageUrl !== 'string' || !imageUrl.startsWith('http') || isVideoUrl(imageUrl)) {
@@ -76,52 +80,169 @@ async function fetchImageAsInlineData(imageUrl: string): Promise<{ mimeType: str
       return null;
     }
 
-    const base64Data = Buffer.from(response.data).toString('base64');
+    // Downscale to max 768px (Gemini's native single tile size) and compress with JPEG quality 70%
+    const compressedBuffer = await sharp(response.data)
+      .resize({
+        width: 768,
+        height: 768,
+        fit: 'inside',
+        withoutEnlargement: true,
+      })
+      .jpeg({ quality: 70, progressive: true })
+      .toBuffer();
+
+    const originalKb = (response.data.length / 1024).toFixed(1);
+    const compressedKb = (compressedBuffer.length / 1024).toFixed(1);
+    logger.debug('AIVisualService', `Compressed image from ${originalKb}KB -> ${compressedKb}KB for ${imageUrl.substring(0, 50)}...`);
+
+    const base64Data = compressedBuffer.toString('base64');
 
     return {
-      mimeType,
+      mimeType: 'image/jpeg',
       data: base64Data,
     };
   } catch (error) {
-    logger.warn('AIVisualService', `Failed to fetch image ${imageUrl.substring(0, 80)}...:`, (error as Error).message);
+    logger.warn('AIVisualService', `Failed to fetch/compress image ${imageUrl.substring(0, 80)}...:`, (error as Error).message);
     return null;
   }
 }
 
 /**
- * Downloads video from URL and converts it to base64 with video/mp4 mimeType.
+ * Helper to identify supported audio extensions.
  */
-async function fetchVideoAsInlineData(videoUrl: string): Promise<{ mimeType: string; data: string } | null> {
-  if (!videoUrl || typeof videoUrl !== 'string' || !videoUrl.startsWith('http')) {
+function isAudioUrl(url: string): boolean {
+  if (!url) return false;
+  const clean = url.toLowerCase().split('?')[0];
+  return (
+    clean.endsWith('.mp3') ||
+    clean.endsWith('.wav') ||
+    clean.endsWith('.aac') ||
+    clean.endsWith('.m4a') ||
+    clean.endsWith('.ogg') ||
+    clean.endsWith('.flac')
+  );
+}
+
+function getAudioMimeType(url: string, responseContentType?: string): string {
+  if (responseContentType && responseContentType.startsWith('audio/')) {
+    return responseContentType.split(';')[0].trim();
+  }
+  const clean = url.toLowerCase().split('?')[0];
+  if (clean.endsWith('.mp3')) return 'audio/mp3';
+  if (clean.endsWith('.wav')) return 'audio/wav';
+  if (clean.endsWith('.aac')) return 'audio/aac';
+  if (clean.endsWith('.m4a')) return 'audio/mp4';
+  if (clean.endsWith('.ogg')) return 'audio/ogg';
+  if (clean.endsWith('.flac')) return 'audio/flac';
+  return 'audio/mp3';
+}
+
+/**
+ * Downloads audio file or accepts audio Buffer and converts to inline base64 for Gemini multimodal transcription.
+ */
+async function fetchAudioAsInlineData(
+  audioUrlOrBuffer: string | Buffer,
+  fallbackMime = 'audio/mp3'
+): Promise<{ mimeType: string; data: string } | null> {
+  if (!audioUrlOrBuffer) return null;
+
+  if (Buffer.isBuffer(audioUrlOrBuffer)) {
+    return {
+      mimeType: fallbackMime,
+      data: audioUrlOrBuffer.toString('base64'),
+    };
+  }
+
+  if (typeof audioUrlOrBuffer !== 'string' || !audioUrlOrBuffer.startsWith('http')) {
     return null;
   }
 
   try {
-    const response = await axios.get(videoUrl, {
+    const isFacebookOrMeta =
+      audioUrlOrBuffer.includes('fbsbx.com') ||
+      audioUrlOrBuffer.includes('facebook.com') ||
+      audioUrlOrBuffer.includes('fbcdn.net');
+    const userAgent = isFacebookOrMeta
+      ? 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)'
+      : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+
+    const response = await axios.get(audioUrlOrBuffer, {
       responseType: 'arraybuffer',
-      timeout: 12000,
-      maxContentLength: 15 * 1024 * 1024, // Limit to 15MB for fast inline processing
+      timeout: 8000,
+      maxContentLength: 10 * 1024 * 1024, // 10MB limit
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'User-Agent': userAgent,
+        'Accept': 'audio/*,*/*;q=0.8',
       },
     });
 
-    const rawContentType = response.headers['content-type'];
-    const contentType = typeof rawContentType === 'string' ? rawContentType : 'video/mp4';
-    let mimeType = contentType.split(';')[0].trim();
-    if (!mimeType.startsWith('video/')) {
-      mimeType = 'video/mp4';
-    }
-
+    const contentType = response.headers['content-type'];
+    const mimeType = getAudioMimeType(
+      audioUrlOrBuffer,
+      typeof contentType === 'string' ? contentType : undefined
+    );
     const base64Data = Buffer.from(response.data).toString('base64');
+
+    logger.debug(
+      'AIVisualService',
+      `Fetched audio (${(response.data.length / 1024).toFixed(1)}KB, ${mimeType}) for ${audioUrlOrBuffer.substring(0, 50)}...`
+    );
+
     return {
       mimeType,
       data: base64Data,
     };
   } catch (error) {
-    logger.warn('AIVisualService', `Failed to fetch video ${videoUrl.substring(0, 80)}...:`, (error as Error).message);
+    logger.warn(
+      'AIVisualService',
+      `Failed to fetch audio ${audioUrlOrBuffer.substring(0, 80)}...:`,
+      (error as Error).message
+    );
     return null;
   }
+}
+
+/**
+ * Helper to detect target social media platforms (X/Twitter, Instagram, LinkedIn, Reddit).
+ */
+function detectSocialPlatform(input: AIVisualAnalysisInput): { isSocialMedia: boolean; platform: string | null } {
+  const siteLower = (input.site_name || '').toLowerCase();
+  const typeLower = (input.type || '').toLowerCase();
+  const urlLower = (input.url || '').toLowerCase();
+
+  if (
+    typeLower === 'twitter' ||
+    siteLower.includes('twitter') ||
+    siteLower.includes('x.com') ||
+    urlLower.includes('twitter.com') ||
+    urlLower.includes('x.com')
+  ) {
+    return { isSocialMedia: true, platform: 'twitter' };
+  }
+  if (
+    typeLower === 'instagram' ||
+    siteLower.includes('instagram') ||
+    urlLower.includes('instagram.com')
+  ) {
+    return { isSocialMedia: true, platform: 'instagram' };
+  }
+  if (
+    typeLower === 'linkedin' ||
+    siteLower.includes('linkedin') ||
+    urlLower.includes('linkedin.com')
+  ) {
+    return { isSocialMedia: true, platform: 'linkedin' };
+  }
+  if (
+    typeLower === 'reddit' ||
+    siteLower.includes('reddit') ||
+    urlLower.includes('reddit.com') ||
+    urlLower.includes('redd.it')
+  ) {
+    return { isSocialMedia: true, platform: 'reddit' };
+  }
+
+  return { isSocialMedia: false, platform: null };
 }
 
 /**
@@ -166,12 +287,18 @@ function buildFallbackAnalysis(input: AIVisualAnalysisInput, reason?: string): A
 }
 
 const CANDIDATE_MODELS = [
-  'gemini-3.6-flash',
-  'gemini-3.7-flash',
+  'gemini-3.5-flash-lite',
+  'gemini-3.1-flash-lite',
   'gemini-3.8-flash',
-  'gemini-flash-latest',
-  'gemini-2.5-flash',
+  'gemini-3.7-flash',
+  'gemini-3.6-flash',
+  'gemini-3.5-flash',
 ];
+
+// In-memory circuit breaker for quota-exhausted models (500 RPD vs 20 RPD limits)
+const exhaustedModels = new Set<string>();
+
+const DEFAULT_MODEL_TIMEOUT_MS = 7000;
 
 /**
  * Main AI Visual & Video Intelligence Analyzer using Google Gemini Multimodal Vision API.
@@ -185,19 +312,20 @@ export async function analyzeVisualContext(input: AIVisualAnalysisInput): Promis
     return buildFallbackAnalysis(input, 'AI Key not configured in .env');
   }
 
-  // Check in-memory AI cache (1 hour TTL)
-  const cacheKey = `${input.url}::${input.title || ''}::${input.snapshot || ''}`;
-  const cachedResult = aiCache.get(cacheKey);
-  if (cachedResult) {
-    logger.debug('AIVisualService', `Cache hit for ${input.url}`);
-    return cachedResult;
+  // Check in-memory AI cache (1 hour TTL) unless forceRefresh is set
+  const canonicalUrl = canonicalizeUrl(input.url) || input.url;
+  const cacheKey = `${canonicalUrl}::${(input.title || '').trim()}`;
+  if (!input.forceRefresh) {
+    const cachedResult = aiCache.get(cacheKey);
+    if (cachedResult) {
+      logger.debug('AIVisualService', `Cache hit for ${canonicalUrl}`);
+      return cachedResult;
+    }
   }
 
-  // Platform Detection
-  const siteLower = (input.site_name || '').toLowerCase();
-  const typeLower = (input.type || '').toLowerCase();
-  const urlLower = (input.url || '').toLowerCase();
-  const isInstagram = typeLower === 'instagram' || siteLower.includes('instagram') || urlLower.includes('instagram.com');
+  // Platform Detection & Social Media Check
+  const { isSocialMedia, platform: socialPlatform } = detectSocialPlatform(input);
+  const isInstagram = socialPlatform === 'instagram';
 
   // Pre-Validation: Detect Login Wall or Missing Media/Content
   const titleText = (input.title || '').trim();
@@ -234,49 +362,108 @@ export async function analyzeVisualContext(input: AIVisualAnalysisInput): Promis
   }
 
   try {
-    // 1. Identify Candidate Video & Image URLs
-    let videoUrlCandidate: string | null = null;
+    // 1. Identify Candidate Visual Assets (Images & Video Posters) & Audio tracks
+    // To minimize token consumption and maximize speed, we do NOT stream raw heavy video files (.mp4).
+    // Instead, we analyze the video's poster keyframe + compressed images along with caption/transcript text
+    // and inline audio tracks when available for social media.
+    let isVideo = false;
+    const candidateImageUrls: string[] = [];
+    let candidateAudioUrl: string | Buffer | null = null;
+    let candidateAudioMime = 'audio/mp3';
 
-    if (input.snapshot && isVideoUrl(input.snapshot)) {
-      videoUrlCandidate = input.snapshot;
-    }
-
-    if (input.card_data && Array.isArray(input.card_data.media)) {
-      const vItem = input.card_data.media.find((m: any) => m && m.url && typeof m.url === 'string' && (m.type === 'video' || isVideoUrl(m.url)));
-      if (vItem) {
-        videoUrlCandidate = vItem.url;
+    if (input.snapshot) {
+      if (isVideoUrl(input.snapshot)) {
+        isVideo = true;
+      } else {
+        candidateImageUrls.push(input.snapshot);
       }
     }
 
-    const imageMediaUrls: string[] = [];
-    if (input.snapshot && !isVideoUrl(input.snapshot)) {
-      imageMediaUrls.push(input.snapshot);
-    }
-
-    if (input.card_data && Array.isArray(input.card_data.media)) {
-      input.card_data.media.forEach((m: any) => {
-        if (m && m.url && typeof m.url === 'string' && m.type !== 'video' && !isVideoUrl(m.url) && !imageMediaUrls.includes(m.url)) {
-          imageMediaUrls.push(m.url);
+    if (input.card_data) {
+      // Check audio track in card_data (card_data.audio or card_data.media audio items)
+      if (input.card_data.audio) {
+        if (typeof input.card_data.audio === 'string') {
+          candidateAudioUrl = input.card_data.audio;
+        } else if (Buffer.isBuffer(input.card_data.audio)) {
+          candidateAudioUrl = input.card_data.audio;
+        } else if (typeof input.card_data.audio.url === 'string') {
+          candidateAudioUrl = input.card_data.audio.url;
+          if (input.card_data.audio.mimeType) candidateAudioMime = input.card_data.audio.mimeType;
+        } else if (Buffer.isBuffer(input.card_data.audio.buffer)) {
+          candidateAudioUrl = input.card_data.audio.buffer;
+          if (input.card_data.audio.mimeType) candidateAudioMime = input.card_data.audio.mimeType;
         }
-      });
+      }
+
+      if (Array.isArray(input.card_data.media)) {
+        input.card_data.media.forEach((m: any) => {
+          if (!m) return;
+          if (m.type === 'video' || (m.url && isVideoUrl(m.url))) {
+            isVideo = true;
+            // Capture poster / thumbnail keyframe for the video
+            if (m.poster && typeof m.poster === 'string' && !candidateImageUrls.includes(m.poster)) {
+              candidateImageUrls.push(m.poster);
+            }
+            if (m.thumbnail && typeof m.thumbnail === 'string' && !candidateImageUrls.includes(m.thumbnail)) {
+              candidateImageUrls.push(m.thumbnail);
+            }
+            // Check if audio track is attached to video media item
+            if (m.audio_url && typeof m.audio_url === 'string' && !candidateAudioUrl) {
+              candidateAudioUrl = m.audio_url;
+            }
+          } else if (m.type === 'audio' || (m.url && isAudioUrl(m.url))) {
+            if (!candidateAudioUrl) {
+              candidateAudioUrl = m.url;
+            }
+          } else if (m.url && typeof m.url === 'string' && !isVideoUrl(m.url) && !candidateImageUrls.includes(m.url)) {
+            candidateImageUrls.push(m.url);
+          }
+        });
+      }
     }
 
-    // Limit image candidates to top 4
-    const targetImageUrls = imageMediaUrls.slice(0, 4);
+    // Limit to top 2 images (e.g. poster keyframe + primary image, or top 2 carousel slides)
+    // With 768px Sharp downscaling, this guarantees exactly 258 - 516 image tokens max (~40KB payload).
+    const targetImageUrls = candidateImageUrls.slice(0, 2);
 
-    // 2. Fetch Video Part & Image Parts asynchronously
-    const videoPartProm = videoUrlCandidate ? fetchVideoAsInlineData(videoUrlCandidate) : Promise.resolve(null);
+    // 2. Fetch and compress candidate images via Sharp & fetch audio if on social media
     const imagePartsProm = Promise.all(targetImageUrls.map((u) => fetchImageAsInlineData(u)));
+    const audioPartProm = (isSocialMedia && (isVideo || candidateAudioUrl) && candidateAudioUrl)
+      ? fetchAudioAsInlineData(candidateAudioUrl, candidateAudioMime)
+      : Promise.resolve(null);
 
-    const [videoPart, rawImageParts] = await Promise.all([videoPartProm, imagePartsProm]);
+    const [rawImageParts, audioPart] = await Promise.all([imagePartsProm, audioPartProm]);
     const validImageParts = rawImageParts.filter((p): p is { mimeType: string; data: string } => p !== null);
 
-    logger.info('AIVisualService', `Starting Gemini Multimodal Analysis: video=${!!videoPart}, images=${validImageParts.length} for "${input.title || input.url}"`);
+    logger.info(
+      'AIVisualService',
+      `Starting Gemini Multimodal Analysis: isSocialMedia=${isSocialMedia}, platform=${socialPlatform || 'other'}, isVideo=${isVideo}, hasAudio=${!!audioPart}, compressedImages=${validImageParts.length} for "${input.title || input.url}"`
+    );
 
-    // 3. Construct prompt for Gemini Multimodal Video & Visual Intelligence
+    // 3. Construct prompt for Gemini Multimodal Visual & Video Intelligence
+    let mediaContextDescription = '';
+    let speechTranscriptionInstruction = '';
+
+    if (isSocialMedia && (isVideo || audioPart)) {
+      mediaContextDescription = `This bookmark is a ${socialPlatform || 'social media'} video/clip/reel. The attached visual represents the video poster/keyframe thumbnail. ${audioPart ? 'An audio track is attached for simultaneous speech transcription and context synthesis.' : 'No direct audio file is attached; combine the keyframe visual with the post caption, description, and transcript metadata.'}`;
+
+      speechTranscriptionInstruction = `
+SPECIAL MULTIMODAL SOCIAL MEDIA TRANSCRIPTION & SYNTHESIS:
+1. **Speech Transcription & Audio Dialogue**: If an audio track is attached, transcribe and parse spoken dialogue, voiceovers, lyrics, speeches, or commentary.
+2. **Visual-Audio Correlation**: Correlate spoken topics with on-screen actions, keyframe visuals, overlay text, and caption metadata.
+3. **Transcript-Driven Context Synthesis**: Synthesize the transcript insights directly into the 'ai_context' summary alongside visual entities, company/person names, roles, and background knowledge so users can easily search by spoken quotes or topics.
+4. **High-Signal Auto-Tagging**: Extract high-signal, relevant 'ai_tags' covering spoken topics, identified individuals, and themes.
+`.trim();
+    } else if (isVideo) {
+      mediaContextDescription = 'This bookmark is a video/clip/reel. The attached visual represents the video poster/keyframe thumbnail. Combine this keyframe visual with the post caption, description, and transcript text.';
+    } else {
+      mediaContextDescription = 'The attached visual(s) represent the content images/snapshots for this bookmark.';
+    }
+
     const promptText = `
 You are an advanced AI Multimodal Visual & Video Intelligence system for a smart bookmarking platform.
-Your job is to analyze the attached video(s) and image(s) alongside textual metadata.
+Your job is to analyze the attached visual(s)${audioPart ? ' and audio track' : ''} alongside textual metadata.
+${mediaContextDescription}
 
 Bookmark Title: "${input.title || ''}"
 Bookmark Description: "${input.description || ''}"
@@ -284,16 +471,16 @@ Platform/Source: "${input.site_name || input.type || ''}"
 URL: "${input.url}"
 
 CRITICAL ANTI-HALLUCINATION RULES:
-- Rely strictly on the attached video, image(s), and verified textual metadata.
-- IF NO VALID VIDEO OR IMAGE IS ATTACHED and metadata is generic or missing (e.g. login wall or restricted page), DO NOT invent, guess, or hallucinate specific TV shows, movies, actors (e.g. Friends, Jennifer Aniston, Gucci), or fictional events based on URL shortcodes.
+- Rely strictly on the attached image(s)/keyframe${audioPart ? ', audio track,' : ''} and verified textual metadata.
+- IF NO VALID IMAGE IS ATTACHED and metadata is generic or missing (e.g. login wall or restricted page), DO NOT invent, guess, or hallucinate specific TV shows, movies, actors, or fictional events based on URL shortcodes.
 - If visual media is unavailable or restricted, state clearly that the bookmark is a saved link from ${input.site_name || 'the platform'} where media content was restricted by login, and generate relevant generic tags.
 
-Requirements (When visual/video media IS provided):
-1. **Video & Visual Entity Recognition**: Watch the attached video and examine any photo(s) carefully. Identify any famous individuals, actors, public figures, podcasters, logos, landmarks, or visual scenes.
-2. **Video Action & Spoken Audio / OCR Context**: Synthesize what happens in the video (actions, scene, spoken topic, captions, on-screen text, job notifications).
-3. **Synthesize Rich AI Context**: Write a detailed, highly informative, 2-4 sentence context paragraph blending video insights, visual entities, company/person names, job roles, and background knowledge. Ensure key search terms are naturally included.
+Requirements (When visual media IS provided):
+1. **Visual & Entity Recognition**: Examine any keyframe photo(s) carefully. Identify any famous individuals, actors, public figures, podcasters, logos, landmarks, products, or visual scenes.
+2. **Context & OCR Synthesis**: Synthesize what is happening (actions, scene, topics, on-screen text, job notifications, captions, or transcript details).
+3. **Synthesize Rich AI Context**: Write a detailed, highly informative, 2-4 sentence context paragraph blending visual insights, entities, company/person names, roles, and background knowledge. Ensure key search terms are naturally included.
 4. **Auto-Tagging**: Return a clean array of 4-10 concise tags (lowercase, hyphenated for multi-words, no # prefix).
-
+${speechTranscriptionInstruction ? `\n${speechTranscriptionInstruction}\n` : ''}
 Return strictly valid JSON in this exact structure:
 {
   "ai_context": "Rich detailed synthesis paragraph...",
@@ -309,17 +496,7 @@ Return strictly valid JSON in this exact structure:
     // Prepare contents array for @google/genai SDK
     const contents: any[] = [];
 
-    // Add video part first if present
-    if (videoPart) {
-      contents.push({
-        inlineData: {
-          mimeType: videoPart.mimeType,
-          data: videoPart.data,
-        },
-      });
-    }
-
-    // Add image parts next
+    // Add compressed image parts
     validImageParts.forEach((img) => {
       contents.push({
         inlineData: {
@@ -329,22 +506,52 @@ Return strictly valid JSON in this exact structure:
       });
     });
 
+    // Add audio track if present (for social media videos)
+    if (audioPart) {
+      contents.push({
+        inlineData: {
+          mimeType: audioPart.mimeType,
+          data: audioPart.data,
+        },
+      });
+    }
+
     // Add text prompt
     contents.push({ text: promptText });
 
     let responseText: string | null = null;
     let lastError: any = null;
 
+    const modelTimeoutMs = parseInt(
+      process.env.AI_MODEL_TIMEOUT_MS || String(DEFAULT_MODEL_TIMEOUT_MS),
+      10
+    );
+
     for (const modelName of CANDIDATE_MODELS) {
+      if (exhaustedModels.has(modelName)) {
+        logger.debug('AIVisualService', `Skipping exhausted model: ${modelName}`);
+        continue;
+      }
+
+      let timeoutHandle: NodeJS.Timeout | null = null;
       try {
-        logger.debug('AIVisualService', `Attempting generation with model: ${modelName}...`);
-        const response = await ai.models.generateContent({
+        logger.debug('AIVisualService', `Attempting generation with model: ${modelName} (timeout: ${modelTimeoutMs}ms)...`);
+
+        const generatePromise = ai.models.generateContent({
           model: modelName,
           contents,
           config: {
             responseMimeType: 'application/json',
           },
         });
+
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timeoutHandle = setTimeout(() => {
+            reject(new Error(`Model generation timed out after ${modelTimeoutMs}ms`));
+          }, modelTimeoutMs);
+        });
+
+        const response = await Promise.race([generatePromise, timeoutPromise]);
 
         if (response.text) {
           responseText = response.text;
@@ -353,7 +560,27 @@ Return strictly valid JSON in this exact structure:
         }
       } catch (err: any) {
         lastError = err;
-        logger.warn('AIVisualService', `Model ${modelName} failed:`, err?.message || err);
+        const errMsg = (err?.message || String(err)).toLowerCase();
+        const isQuotaExceeded =
+          errMsg.includes('limit: 20') ||
+          errMsg.includes('generaterequestsperday') ||
+          errMsg.includes('resource_exhausted') ||
+          errMsg.includes('quota exceeded') ||
+          errMsg.includes('429');
+
+        if (isQuotaExceeded) {
+          exhaustedModels.add(modelName);
+          logger.warn(
+            'AIVisualService',
+            `Circuit breaker tripped: Model "${modelName}" marked as exhausted due to quota limit: ${err?.message || err}`
+          );
+        } else {
+          logger.warn('AIVisualService', `Model ${modelName} failed or timed out:`, err?.message || err);
+        }
+      } finally {
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+        }
       }
     }
 

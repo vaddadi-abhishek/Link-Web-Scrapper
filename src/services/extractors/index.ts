@@ -7,6 +7,7 @@ import { linkedInExtractor } from './linkedin';
 import { youtubeExtractor } from './youtube';
 import { globalWebExtractor } from './globalWeb';
 import { extractionCache } from '../../utils/cache';
+import { canonicalizeUrl } from '../../utils/urlFormatter';
 import { logger } from '../../utils/logger';
 
 export * from './types';
@@ -25,18 +26,21 @@ const PLATFORM_EXTRACTORS: Array<{ pattern: RegExp; extractor: PlatformExtractor
 ];
 
 /**
- * Returns the appropriate platform extractor based on URL hostname.
+ * Determines the platform-specific extractor to execute based on the target URL domain.
  */
 export function getExtractorForUrl(targetUrl: string): PlatformExtractor {
+  const cleanUrl = targetUrl.trim().toLowerCase();
+
   try {
-    const host = new URL(targetUrl).hostname;
-    for (const item of PLATFORM_EXTRACTORS) {
-      if (item.pattern.test(host)) {
-        return item.extractor;
-      }
+    const parsed = new URL(cleanUrl.startsWith('http') ? cleanUrl : `https://${cleanUrl}`);
+    const hostname = parsed.hostname;
+
+    const matched = PLATFORM_EXTRACTORS.find(({ pattern }) => pattern.test(hostname));
+    if (matched) {
+      return matched.extractor;
     }
   } catch {
-    // Default fallback
+    // If URL parsing fails, default to global web extractor
   }
 
   return globalWebExtractor;
@@ -51,7 +55,8 @@ export async function dispatchExtraction(
   html?: string,
   options?: DispatchOptions
 ): Promise<{ result: ExtractionResult; platform: string; cached?: boolean }> {
-  const cacheKey = targetUrl.trim();
+  const canonicalUrl = canonicalizeUrl(targetUrl) || targetUrl.trim();
+  const cacheKey = canonicalUrl;
   const bypassCache = Boolean(options?.forceRefresh || html);
 
   if (!bypassCache) {
