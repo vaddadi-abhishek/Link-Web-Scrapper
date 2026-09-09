@@ -53,12 +53,14 @@ function isFacebookPostImage(url: string | null): boolean {
   // Reject Facebook stickers, comment emojis, avatars, and profile pictures
   if (
     l.includes('t39.1997') || // Facebook stickers / comment emojis CDN
-    l.includes('t39.30808') || // Facebook profile pictures CDN
+    l.includes('t39.30808-1') || // Facebook profile pictures CDN (specifically -1, not -6 which are post photos)
     l.includes('/stickers/') ||
     l.includes('sticker') ||
     l.includes('emoji') ||
     l.includes('120x120') ||
-    l.includes('100x100')
+    l.includes('100x100') ||
+    l.includes('40x40') ||
+    l.includes('50x50')
   ) {
     return false;
   }
@@ -110,7 +112,7 @@ async function resolveDirectFacebookCdnImage(mediaIdOrUrl: string): Promise<stri
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
       },
-      timeout: 3000,
+      timeout: 5000,
     });
 
     const $ = cheerio.load(res.data);
@@ -123,11 +125,15 @@ async function resolveDirectFacebookCdnImage(mediaIdOrUrl: string): Promise<stri
       /https:\/\/[^"'\s\\]*scontent[^"'\s\\]*(?:dst-jpg|\.jpg|\.png|\.webp)[^"'\s\\]*/g
     );
     if (matches && matches.length > 0) {
-      return matches[0]
-        .replace(/\\u0025/g, '%')
-        .replace(/\\u0026/g, '&')
-        .replace(/\\\//g, '/')
-        .replace(/&amp;/g, '&');
+      const cleanMatches = matches.map((m: string) =>
+        m
+          .replace(/\\u0025/g, '%')
+          .replace(/\\u0026/g, '&')
+          .replace(/\\\//g, '/')
+          .replace(/&amp;/g, '&')
+      );
+      const postMatch = cleanMatches.find((m: string) => isFacebookPostImage(m));
+      return postMatch || cleanMatches[0];
     }
   } catch {
     // Fall back to original URL
