@@ -1,4 +1,4 @@
-# Tagger Node Backend (`tagger-node-backend`)
+# mindspace Node Backend (`mindspace-node-backend`)
 
 A stateless, high-performance **REST API** built with **Node.js**, **Express**, **TypeScript**, **Cheerio**, **Playwright**, and **Google Gemini Multimodal Vision API** (`@google/genai`).
 
@@ -262,7 +262,7 @@ Returns service uptime status:
 ## Project Structure
 
 ```
-tagger-node-backend/
+mindspace-node-backend/
 ├── src/
 │   ├── controllers/
 │   │   ├── aiController.ts         # Controller for /api/v1/ai-analyze
@@ -304,7 +304,7 @@ tagger-node-backend/
 
 ## Database Schema & Supabase Setup (`schema.sql`)
 
-The repository includes a complete PostgreSQL schema script in [`schema.sql`](file:///c:/Users/abhi/Documents/tagger-app/tagger-node-backend/schema.sql) ready to be executed in the **Supabase SQL Editor**:
+The repository includes a complete PostgreSQL schema script in [`schema.sql`](file:///c:/Users/abhi/Documents/mindspace-app/mindspace-node-backend/schema.sql) ready to be executed in the **Supabase SQL Editor**:
 
 ### 1. Key Database Changes & Architecture
 - **Wiped Off Obsolete Tables**:
@@ -323,13 +323,13 @@ The repository includes a complete PostgreSQL schema script in [`schema.sql`](fi
 ### 2. How to Apply
 1. Open your project on the [Supabase Dashboard](https://supabase.com/dashboard).
 2. Navigate to the **SQL Editor** tab on the left sidebar.
-3. Copy the entire contents of [`tagger-node-backend/schema.sql`](file:///c:/Users/abhi/Documents/tagger-app/tagger-node-backend/schema.sql).
+3. Copy the entire contents of [`mindspace-node-backend/schema.sql`](file:///c:/Users/abhi/Documents/mindspace-app/mindspace-node-backend/schema.sql).
 4. Paste it into the editor and click **Run**.
 
 
 ## Environment Setup
 
-Create a `.env` file in `tagger-node-backend/` based on `.env.example`:
+Create a `.env` file in `mindspace-node-backend/` based on `.env.example`:
 
 ```env
 PORT=3000

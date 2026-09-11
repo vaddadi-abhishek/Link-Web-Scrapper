@@ -21,7 +21,7 @@ async function tryFxTwitterApi(tweetId: string, targetUrl: string): Promise<Extr
       timeout: 2000,
       headers: {
         'Accept': 'application/json',
-        'User-Agent': 'TaggerApp/1.0',
+        'User-Agent': 'mindspaceApp/1.0',
       },
       validateStatus: (status) => status === 200,
     });

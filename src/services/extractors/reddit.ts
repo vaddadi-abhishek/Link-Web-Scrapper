@@ -125,7 +125,7 @@ async function tryPullPushReddit(postId: string): Promise<ExtractionResult<Reddi
       timeout: 2500,
       headers: {
         'Accept': 'application/json',
-        'User-Agent': 'TaggerApp/1.0',
+        'User-Agent': 'mindspaceApp/1.0',
       },
       validateStatus: (status) => status === 200,
     });
@@ -288,7 +288,7 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
           description = ps.length > 0 ? ps.join('\n\n') : articleBodyEl.text().trim();
         } else {
           const fallbackBody = $('shreddit-post-text-body [data-post-click-location="text-body"]').first().text().trim() ||
-                               $('shreddit-post-text-body').first().text().trim();
+            $('shreddit-post-text-body').first().text().trim();
           if (fallbackBody) description = fallbackBody;
         }
         if (description) {
@@ -319,7 +319,7 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
     if (canonicalUrl.includes('/comments/')) {
       try {
         const oembedRes = await axios.get(`https://www.reddit.com/oembed?url=${encodeURIComponent(canonicalUrl)}`, {
-          headers: { 'User-Agent': 'TaggerApp/1.0' },
+          headers: { 'User-Agent': 'mindspaceApp/1.0' },
           timeout: 2500,
         });
         if (oembedRes.data) {
@@ -428,7 +428,7 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
                         videoUrl = sorted[0].source.url;
                       }
                     }
-                  } catch {}
+                  } catch { }
                 }
 
                 if (!videoUrl) {
@@ -454,8 +454,8 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
               if (
                 contentHref &&
                 (contentHref.includes('i.redd.it') ||
-                 contentHref.includes('preview.redd.it') ||
-                 /\.(jpg|jpeg|png|gif|webp|heic|avif)(\?.*)?$/i.test(contentHref)) &&
+                  contentHref.includes('preview.redd.it') ||
+                  /\.(jpg|jpeg|png|gif|webp|heic|avif)(\?.*)?$/i.test(contentHref)) &&
                 !contentHref.includes('reddit.com/gallery') &&
                 !contentHref.includes('reddit.com/r/') &&
                 !contentHref.includes('reddit.com/comments/')
