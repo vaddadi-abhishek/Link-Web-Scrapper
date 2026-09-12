@@ -14,6 +14,8 @@ export interface AIVisualAnalysisInput {
   type?: string;
   card_data?: any;
   forceRefresh?: boolean;
+  article_content?: string | null;
+  page_intent?: 'article' | 'tool_or_resource' | 'auth_or_portal' | 'general_website' | string | null;
 }
 
 export interface AIVisualAnalysisResult {
@@ -103,101 +105,6 @@ async function fetchImageAsInlineData(imageUrl: string): Promise<{ mimeType: str
     };
   } catch (error) {
     logger.warn('AIVisualService', `Failed to fetch/compress image ${imageUrl.substring(0, 80)}...:`, (error as Error).message);
-    return null;
-  }
-}
-
-/**
- * Helper to identify supported audio extensions.
- */
-function isAudioUrl(url: string): boolean {
-  if (!url) return false;
-  const clean = url.toLowerCase().split('?')[0];
-  return (
-    clean.endsWith('.mp3') ||
-    clean.endsWith('.wav') ||
-    clean.endsWith('.aac') ||
-    clean.endsWith('.m4a') ||
-    clean.endsWith('.ogg') ||
-    clean.endsWith('.flac')
-  );
-}
-
-function getAudioMimeType(url: string, responseContentType?: string): string {
-  if (responseContentType && responseContentType.startsWith('audio/')) {
-    return responseContentType.split(';')[0].trim();
-  }
-  const clean = url.toLowerCase().split('?')[0];
-  if (clean.endsWith('.mp3')) return 'audio/mp3';
-  if (clean.endsWith('.wav')) return 'audio/wav';
-  if (clean.endsWith('.aac')) return 'audio/aac';
-  if (clean.endsWith('.m4a')) return 'audio/mp4';
-  if (clean.endsWith('.ogg')) return 'audio/ogg';
-  if (clean.endsWith('.flac')) return 'audio/flac';
-  return 'audio/mp3';
-}
-
-/**
- * Downloads audio file or accepts audio Buffer and converts to inline base64 for Gemini multimodal transcription.
- */
-async function fetchAudioAsInlineData(
-  audioUrlOrBuffer: string | Buffer,
-  fallbackMime = 'audio/mp3'
-): Promise<{ mimeType: string; data: string } | null> {
-  if (!audioUrlOrBuffer) return null;
-
-  if (Buffer.isBuffer(audioUrlOrBuffer)) {
-    return {
-      mimeType: fallbackMime,
-      data: audioUrlOrBuffer.toString('base64'),
-    };
-  }
-
-  if (typeof audioUrlOrBuffer !== 'string' || !audioUrlOrBuffer.startsWith('http')) {
-    return null;
-  }
-
-  try {
-    const isFacebookOrMeta =
-      audioUrlOrBuffer.includes('fbsbx.com') ||
-      audioUrlOrBuffer.includes('facebook.com') ||
-      audioUrlOrBuffer.includes('fbcdn.net');
-    const userAgent = isFacebookOrMeta
-      ? 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)'
-      : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
-
-    const response = await axios.get(audioUrlOrBuffer, {
-      responseType: 'arraybuffer',
-      timeout: 8000,
-      maxContentLength: 10 * 1024 * 1024, // 10MB limit
-      headers: {
-        'User-Agent': userAgent,
-        'Accept': 'audio/*,*/*;q=0.8',
-      },
-    });
-
-    const contentType = response.headers['content-type'];
-    const mimeType = getAudioMimeType(
-      audioUrlOrBuffer,
-      typeof contentType === 'string' ? contentType : undefined
-    );
-    const base64Data = Buffer.from(response.data).toString('base64');
-
-    logger.debug(
-      'AIVisualService',
-      `Fetched audio (${(response.data.length / 1024).toFixed(1)}KB, ${mimeType}) for ${audioUrlOrBuffer.substring(0, 50)}...`
-    );
-
-    return {
-      mimeType,
-      data: base64Data,
-    };
-  } catch (error) {
-    logger.warn(
-      'AIVisualService',
-      `Failed to fetch audio ${audioUrlOrBuffer.substring(0, 80)}...:`,
-      (error as Error).message
-    );
     return null;
   }
 }
@@ -362,125 +269,127 @@ export async function analyzeVisualContext(input: AIVisualAnalysisInput): Promis
   }
 
   try {
-    // 1. Identify Candidate Visual Assets (Images & Video Posters) & Audio tracks
-    // To minimize token consumption and maximize speed, we do NOT stream raw heavy video files (.mp4).
-    // Instead, we analyze the video's poster keyframe + compressed images along with caption/transcript text
-    // and inline audio tracks when available for social media.
+    // 1. Determine Page Intent
+    const pageIntent =
+      input.page_intent ||
+      input.card_data?.page_intent ||
+      (input.type === 'article' || input.card_data?.type === 'article' ? 'article' : 'general_website');
+    const isArticle = pageIntent === 'article';
+    const articleContent = input.article_content || input.card_data?.article_content || null;
+
+    // 2. Identify Candidate Visual Assets (Images & Video Posters)
+    // CRITICAL: Avoid fetching, compressing, or sending images to AI for articles.
+    // Article hero images are decorative banners/metaphors that distract the AI and waste tokens.
     let isVideo = false;
-    const candidateImageUrls: string[] = [];
-    let candidateAudioUrl: string | Buffer | null = null;
-    let candidateAudioMime = 'audio/mp3';
+    let validImageParts: { mimeType: string; data: string }[] = [];
 
-    if (input.snapshot) {
-      if (isVideoUrl(input.snapshot)) {
-        isVideo = true;
-      } else {
-        candidateImageUrls.push(input.snapshot);
-      }
-    }
+    if (!isArticle) {
+      const candidateImageUrls: string[] = [];
 
-    if (input.card_data) {
-      // Check audio track in card_data (card_data.audio or card_data.media audio items)
-      if (input.card_data.audio) {
-        if (typeof input.card_data.audio === 'string') {
-          candidateAudioUrl = input.card_data.audio;
-        } else if (Buffer.isBuffer(input.card_data.audio)) {
-          candidateAudioUrl = input.card_data.audio;
-        } else if (typeof input.card_data.audio.url === 'string') {
-          candidateAudioUrl = input.card_data.audio.url;
-          if (input.card_data.audio.mimeType) candidateAudioMime = input.card_data.audio.mimeType;
-        } else if (Buffer.isBuffer(input.card_data.audio.buffer)) {
-          candidateAudioUrl = input.card_data.audio.buffer;
-          if (input.card_data.audio.mimeType) candidateAudioMime = input.card_data.audio.mimeType;
+      if (input.snapshot) {
+        if (isVideoUrl(input.snapshot)) {
+          isVideo = true;
+        } else {
+          candidateImageUrls.push(input.snapshot);
         }
       }
 
-      if (Array.isArray(input.card_data.media)) {
-        input.card_data.media.forEach((m: any) => {
-          if (!m) return;
-          if (m.type === 'video' || (m.url && isVideoUrl(m.url))) {
-            isVideo = true;
-            // Capture poster / thumbnail keyframe for the video
-            if (m.poster && typeof m.poster === 'string' && !candidateImageUrls.includes(m.poster)) {
-              candidateImageUrls.push(m.poster);
+      if (input.card_data) {
+        if (Array.isArray(input.card_data.media)) {
+          input.card_data.media.forEach((m: any) => {
+            if (!m) return;
+            if (m.type === 'video' || (m.url && isVideoUrl(m.url))) {
+              isVideo = true;
+              // Capture poster / thumbnail keyframe for the video
+              if (m.poster && typeof m.poster === 'string' && !candidateImageUrls.includes(m.poster)) {
+                candidateImageUrls.push(m.poster);
+              }
+              if (m.thumbnail && typeof m.thumbnail === 'string' && !candidateImageUrls.includes(m.thumbnail)) {
+                candidateImageUrls.push(m.thumbnail);
+              }
+            } else if (m.url && typeof m.url === 'string' && !isVideoUrl(m.url) && !candidateImageUrls.includes(m.url)) {
+              candidateImageUrls.push(m.url);
             }
-            if (m.thumbnail && typeof m.thumbnail === 'string' && !candidateImageUrls.includes(m.thumbnail)) {
-              candidateImageUrls.push(m.thumbnail);
-            }
-            // Check if audio track is attached to video media item
-            if (m.audio_url && typeof m.audio_url === 'string' && !candidateAudioUrl) {
-              candidateAudioUrl = m.audio_url;
-            }
-          } else if (m.type === 'audio' || (m.url && isAudioUrl(m.url))) {
-            if (!candidateAudioUrl) {
-              candidateAudioUrl = m.url;
-            }
-          } else if (m.url && typeof m.url === 'string' && !isVideoUrl(m.url) && !candidateImageUrls.includes(m.url)) {
-            candidateImageUrls.push(m.url);
-          }
-        });
+          });
+        }
       }
+
+      // Limit to top 2 images (e.g. poster keyframe + primary image, or top 2 carousel slides)
+      // With 768px Sharp downscaling, this guarantees exactly 258 - 516 image tokens max (~40KB payload).
+      const targetImageUrls = candidateImageUrls.slice(0, 2);
+
+      // Fetch and compress candidate images via Sharp
+      const rawImageParts = await Promise.all(targetImageUrls.map((u) => fetchImageAsInlineData(u)));
+      validImageParts = rawImageParts.filter((p): p is { mimeType: string; data: string } => p !== null);
     }
-
-    // Limit to top 2 images (e.g. poster keyframe + primary image, or top 2 carousel slides)
-    // With 768px Sharp downscaling, this guarantees exactly 258 - 516 image tokens max (~40KB payload).
-    const targetImageUrls = candidateImageUrls.slice(0, 2);
-
-    // 2. Fetch and compress candidate images via Sharp & fetch audio if on social media
-    const imagePartsProm = Promise.all(targetImageUrls.map((u) => fetchImageAsInlineData(u)));
-    const audioPartProm = (isSocialMedia && (isVideo || candidateAudioUrl) && candidateAudioUrl)
-      ? fetchAudioAsInlineData(candidateAudioUrl, candidateAudioMime)
-      : Promise.resolve(null);
-
-    const [rawImageParts, audioPart] = await Promise.all([imagePartsProm, audioPartProm]);
-    const validImageParts = rawImageParts.filter((p): p is { mimeType: string; data: string } => p !== null);
 
     logger.info(
       'AIVisualService',
-      `Starting Gemini Multimodal Analysis: isSocialMedia=${isSocialMedia}, platform=${socialPlatform || 'other'}, isVideo=${isVideo}, hasAudio=${!!audioPart}, compressedImages=${validImageParts.length} for "${input.title || input.url}"`
+      `Starting Gemini Analysis: isArticle=${isArticle}, isSocialMedia=${isSocialMedia}, platform=${socialPlatform || 'other'}, isVideo=${isVideo}, compressedImages=${validImageParts.length} for "${input.title || input.url}"`
     );
 
-    // 3. Construct prompt for Gemini Multimodal Visual & Video Intelligence
+    // 3. Construct prompt for Gemini Intelligence
     let mediaContextDescription = '';
-    let speechTranscriptionInstruction = '';
+    let intentSpecificRules = '';
 
-    if (isSocialMedia && (isVideo || audioPart)) {
-      mediaContextDescription = `This bookmark is a ${socialPlatform || 'social media'} video/clip/reel. The attached visual represents the video poster/keyframe thumbnail. ${audioPart ? 'An audio track is attached for simultaneous speech transcription and context synthesis.' : 'No direct audio file is attached; combine the keyframe visual with the post caption, description, and transcript metadata.'}`;
-
-      speechTranscriptionInstruction = `
-SPECIAL MULTIMODAL SOCIAL MEDIA TRANSCRIPTION & SYNTHESIS:
-1. **Speech Transcription & Audio Dialogue**: If an audio track is attached, transcribe and parse spoken dialogue, voiceovers, lyrics, speeches, or commentary.
-2. **Visual-Audio Correlation**: Correlate spoken topics with on-screen actions, keyframe visuals, overlay text, and caption metadata.
-3. **Transcript-Driven Context Synthesis**: Synthesize the transcript insights directly into the 'ai_context' summary alongside visual entities, company/person names, roles, and background knowledge so users can easily search by spoken quotes or topics.
-4. **High-Signal Auto-Tagging**: Extract high-signal, relevant 'ai_tags' covering spoken topics, identified individuals, and themes.
+    if (isArticle) {
+      mediaContextDescription = 'This bookmark is an in-depth article, essay, or blog post. No visual images are attached because article analysis is strictly based on the written text.';
+      intentSpecificRules = `
+ARTICLE MODE RULES:
+- The bookmark is an article or essay. Focus strictly on the written thesis, main arguments, and key insights in the Title, Description, and Article Body Excerpt.
+- In 'ai_context', synthesize what the article is about, its core message, author's perspective, and practical takeaways in 2-4 clear sentences.
+- In 'ai_tags', provide 4-8 high-signal conceptual tags reflecting the core topics, themes, and domains (e.g. competitiveness, psychology, fomo, career, decision-making).
+- In 'visual_entities', return [] (empty array) since no images are analyzed.
+- In 'ocr_text', return "" (empty string).
 `.trim();
+    } else if (isSocialMedia && isVideo) {
+      mediaContextDescription = `This bookmark is a ${socialPlatform || 'social media'} video/clip/reel. The attached visual represents the video poster/keyframe thumbnail. Combine this keyframe visual with the post caption, description, and metadata.`;
     } else if (isVideo) {
-      mediaContextDescription = 'This bookmark is a video/clip/reel. The attached visual represents the video poster/keyframe thumbnail. Combine this keyframe visual with the post caption, description, and transcript text.';
+      mediaContextDescription = 'This bookmark is a video/clip/reel. The attached visual represents the video poster/keyframe thumbnail. Combine this keyframe visual with the post caption, description, and text.';
+    } else if (pageIntent === 'auth_or_portal') {
+      mediaContextDescription = 'This bookmark is an account login, authentication, or portal dashboard page. The attached visual represents the login interface or dashboard landing.';
+      intentSpecificRules = `
+PORTAL / LOGIN PAGE MODE:
+- Focus on the service, platform, and authentication utility provided (e.g. Adobe Creative Cloud, Cloudflare, AWS).
+- Summarize what this portal is for (signing in, account access, authentication) and generate relevant tags (e.g. service-name, login, account, portal).
+`.trim();
+    } else if (pageIntent === 'tool_or_resource') {
+      mediaContextDescription = 'This bookmark is a developer tool, UI component library, utility, or technical resource catalog.';
+      intentSpecificRules = `
+DEVELOPER TOOL / RESOURCE MODE:
+- Focus on the technical capability, components, framework, or utility provided (e.g. UI components, CSS styles, icons, library).
+- Highlight key use-cases and developer features.
+`.trim();
     } else {
       mediaContextDescription = 'The attached visual(s) represent the content images/snapshots for this bookmark.';
     }
 
+    const articleSection =
+      isArticle && articleContent
+        ? `\nArticle Body Text:\n"""\n${articleContent.length > 20000 ? articleContent.substring(0, 20000) + '\n...[truncated]' : articleContent}\n"""\n`
+        : '';
+
     const promptText = `
-You are an advanced AI Multimodal Visual & Video Intelligence system for a smart bookmarking platform.
-Your job is to analyze the attached visual(s)${audioPart ? ' and audio track' : ''} alongside textual metadata.
+You are an advanced AI Intelligence system for a smart bookmarking platform.
+Your job is to analyze the content alongside textual metadata.
 ${mediaContextDescription}
 
 Bookmark Title: "${input.title || ''}"
 Bookmark Description: "${input.description || ''}"
 Platform/Source: "${input.site_name || input.type || ''}"
 URL: "${input.url}"
-
+${articleSection}
 CRITICAL ANTI-HALLUCINATION RULES:
-- Rely strictly on the attached image(s)/keyframe${audioPart ? ', audio track,' : ''} and verified textual metadata.
+- Rely strictly on the attached metadata and verified text.
 - IF NO VALID IMAGE IS ATTACHED and metadata is generic or missing (e.g. login wall or restricted page), DO NOT invent, guess, or hallucinate specific TV shows, movies, actors, or fictional events based on URL shortcodes.
 - If visual media is unavailable or restricted, state clearly that the bookmark is a saved link from ${input.site_name || 'the platform'} where media content was restricted by login, and generate relevant generic tags.
+${intentSpecificRules ? `\n${intentSpecificRules}\n` : ''}
+Requirements:
+1. **Content & Entity Recognition**: Examine textual information (and visual media if attached). For articles, prioritize the written thesis and key takeaways. For UI tools, examine the interface components.
+2. **Context Synthesis**: Synthesize what is happening (topics, thesis, actions, on-screen text, job notifications, captions, or article arguments).
+3. **Synthesize Rich AI Context**: Write a detailed, highly informative, 2-4 sentence context paragraph blending conceptual insights, key arguments, and background knowledge. Ensure key search terms are naturally included.
+4. **Auto-Tagging**: Return a clean array of 4-10 concise tags (lowercase, hyphenated for multi-words, no # prefix) capturing the true subject matter.
 
-Requirements (When visual media IS provided):
-1. **Visual & Entity Recognition**: Examine any keyframe photo(s) carefully. Identify any famous individuals, actors, public figures, podcasters, logos, landmarks, products, or visual scenes.
-2. **Context & OCR Synthesis**: Synthesize what is happening (actions, scene, topics, on-screen text, job notifications, captions, or transcript details).
-3. **Synthesize Rich AI Context**: Write a detailed, highly informative, 2-4 sentence context paragraph blending visual insights, entities, company/person names, roles, and background knowledge. Ensure key search terms are naturally included.
-4. **Auto-Tagging**: Return a clean array of 4-10 concise tags (lowercase, hyphenated for multi-words, no # prefix).
-${speechTranscriptionInstruction ? `\n${speechTranscriptionInstruction}\n` : ''}
 Return strictly valid JSON in this exact structure:
 {
   "ai_context": "Rich detailed synthesis paragraph...",
@@ -505,16 +414,6 @@ Return strictly valid JSON in this exact structure:
         },
       });
     });
-
-    // Add audio track if present (for social media videos)
-    if (audioPart) {
-      contents.push({
-        inlineData: {
-          mimeType: audioPart.mimeType,
-          data: audioPart.data,
-        },
-      });
-    }
 
     // Add text prompt
     contents.push({ text: promptText });

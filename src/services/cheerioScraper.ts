@@ -5,6 +5,14 @@ import { cleanTitle, cleanDescription } from '../utils/textCleaner';
 import { sharedHttpAgent, sharedHttpsAgent } from '../utils/httpClient';
 import { logger } from '../utils/logger';
 
+export type WebPageIntent = 'article' | 'tool_or_resource' | 'auth_or_portal' | 'general_website';
+
+export interface ArticleExtractionResult {
+  content: string | null;
+  wordCount: number;
+  readingTimeMinutes: number;
+}
+
 export interface CheerioExtractionResult {
   title: string | null;
   rawTitle: string | null;
@@ -18,6 +26,11 @@ export interface CheerioExtractionResult {
   authorAvatar: string | null;
   publishedAt: string | null;
   type: string | null;
+  rawHtml?: string | null;
+  pageIntent?: WebPageIntent;
+  articleContent?: string | null;
+  wordCount?: number;
+  readingTimeMinutes?: number;
 }
 
 interface JsonLdData {
@@ -131,6 +144,191 @@ function extractJsonLd($: cheerio.CheerioAPI): JsonLdData {
 }
 
 /**
+ * Detects whether a page is an in-depth article/essay, developer tool/resource, or login/auth portal.
+ */
+export function detectPageIntent(
+  $: cheerio.CheerioAPI,
+  targetUrl: string,
+  ogType?: string | null,
+  jsonLdType?: string | null,
+  proseWordCount: number = 0
+): WebPageIntent {
+  const urlLower = targetUrl.toLowerCase();
+
+  // 1. Auth / Account / Login Portal
+  const isAuthUrl = /\/(login|signin|signup|auth|account|register|join|session|recover|forgot)/i.test(urlLower);
+  const hasPasswordInput = $('input[type="password"], input[name*="pass" i]').length > 0;
+  const hasLoginForm = $('form[action*="login" i], form[action*="auth" i], form[action*="signin" i]').length > 0;
+  if (hasPasswordInput || hasLoginForm || (isAuthUrl && $('input').length > 0)) {
+    return 'auth_or_portal';
+  }
+
+  // 2. Explicit Article Metadata
+  const isArticleMeta =
+    ogType === 'article' ||
+    Boolean(jsonLdType && /article|blogposting/i.test(jsonLdType)) ||
+    $('meta[property="article:published_time"]').length > 0 ||
+    $('meta[name="article:author"]').length > 0 ||
+    $('meta[property="article:author"]').length > 0;
+
+  if (isArticleMeta || ($('article').length > 0 && proseWordCount > 150) || proseWordCount > 250) {
+    return 'article';
+  }
+
+  // 3. Component / Tool / Library / UI Gallery
+  const isDocsOrTools = /\/(components|docs|tools|ui|library|resources|templates|icons|cheatsheet|showcase)/i.test(urlLower);
+  const codeBlocksCount = $('pre, code, .component, .grid, .preview').length;
+  if (isDocsOrTools || codeBlocksCount > 8) {
+    return 'tool_or_resource';
+  }
+
+  return 'general_website';
+}
+
+/**
+ * Extracts the full readable article text in structured Markdown format
+ * from the most relevant article container, stripping non-content elements and ads.
+ */
+export function extractArticleContent($: cheerio.CheerioAPI): ArticleExtractionResult {
+  try {
+    const clone = $('body').clone();
+
+    // 1. Strip non-content and noise elements
+    clone.find(`
+      nav, header, footer, script, style, aside, noscript, svg, form, iframe,
+      .nav, .navbar, .menu, .navigation, .sidebar, .comments, .comment-section,
+      .share, .social-share, .newsletter, .subscription, .advertisement, .ad,
+      .author-bio, .related-posts, .recommended, .cookie-banner, .popup,
+      [role="navigation"], [role="banner"], [role="complementary"], [role="contentinfo"]
+    `).remove();
+
+    // 2. Candidate selectors for article body containers in order of priority
+    const containerSelectors = [
+      'article',
+      '[itemprop="articleBody"]',
+      '.post-content',
+      '.gh-content',
+      '.entry-content',
+      '.article-content',
+      '.article-body',
+      '.story-body',
+      '.content-body',
+      '.post__content',
+      '.markdown-body',
+      'main',
+    ];
+
+    let $container: cheerio.Cheerio<any> | null = null;
+    for (const sel of containerSelectors) {
+      const match = clone.find(sel);
+      if (match.length > 0) {
+        let best = match.first();
+        let maxLen = best.text().trim().length;
+        match.each((_, el) => {
+          const len = $(el).text().trim().length;
+          if (len > maxLen) {
+            maxLen = len;
+            best = $(el);
+          }
+        });
+        if (maxLen > 250) {
+          $container = best;
+          break;
+        }
+      }
+    }
+
+    if (!$container || $container.length === 0) {
+      $container = clone;
+    }
+
+    // 3. Extract structured blocks
+    const blocks: string[] = [];
+    $container.find('h1, h2, h3, h4, h5, h6, p, blockquote, ul, ol, pre, figure, img').each((_, el) => {
+      const $el = $(el);
+      const tag = (el.tagName || '').toLowerCase();
+
+      // Avoid duplicating nested elements (e.g. p inside blockquote or li)
+      if (tag === 'p' && $el.parents('blockquote, li').length > 0) {
+        return;
+      }
+      if (tag === 'img' && $el.parents('figure').length > 0) {
+        return;
+      }
+
+      if (tag === 'p') {
+        const text = $el.text().trim();
+        if (text.length > 20) {
+          blocks.push(text);
+        }
+      } else if (tag.startsWith('h')) {
+        const text = $el.text().trim();
+        if (text) {
+          const levelNum = parseInt(tag.charAt(1), 10) || 2;
+          const prefix = '#'.repeat(levelNum);
+          blocks.push(`${prefix} ${text}`);
+        }
+      } else if (tag === 'blockquote') {
+        const text = $el.text().trim();
+        if (text) {
+          const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+          blocks.push(lines.map((l) => `> ${l}`).join('\n'));
+        }
+      } else if (tag === 'pre') {
+        const codeText = $el.find('code').length > 0 ? $el.find('code').text() : $el.text();
+        if (codeText.trim()) {
+          blocks.push(`\`\`\`\n${codeText.trim()}\n\`\`\``);
+        }
+      } else if (tag === 'ul' || tag === 'ol') {
+        const items: string[] = [];
+        $el.find('li').each((__, li) => {
+          const liText = $(li).text().trim();
+          if (liText) {
+            items.push(`• ${liText}`);
+          }
+        });
+        if (items.length > 0) {
+          blocks.push(items.join('\n'));
+        }
+      } else if (tag === 'figure') {
+        const img = $el.find('img').first();
+        const src = img.attr('src') || img.attr('data-src') || img.attr('data-original');
+        const caption = $el.find('figcaption').text().trim() || img.attr('alt') || '';
+        if (src && !src.startsWith('data:image/svg') && !src.includes('1x1')) {
+          blocks.push(`![${caption}](${src})`);
+        }
+      } else if (tag === 'img') {
+        const src = $el.attr('src') || $el.attr('data-src');
+        const alt = $el.attr('alt') || '';
+        if (src && !src.startsWith('data:image/svg') && !src.includes('1x1') && !src.includes('tracking')) {
+          blocks.push(`![${alt}](${src})`);
+        }
+      }
+    });
+
+    if (blocks.length === 0) {
+      return { content: null, wordCount: 0, readingTimeMinutes: 0 };
+    }
+
+    const fullProse = blocks.join('\n\n').trim();
+    if (!fullProse) {
+      return { content: null, wordCount: 0, readingTimeMinutes: 0 };
+    }
+
+    const wordCount = fullProse.split(/\s+/).filter(Boolean).length;
+    const readingTimeMinutes = Math.max(1, Math.ceil(wordCount / 200));
+
+    return {
+      content: fullProse,
+      wordCount,
+      readingTimeMinutes,
+    };
+  } catch {
+    return { content: null, wordCount: 0, readingTimeMinutes: 0 };
+  }
+}
+
+/**
  * Fast-path scraper using Axios & Cheerio with Connection Reuse.
  * Timeout: 4000ms.
  */
@@ -144,7 +342,7 @@ export async function scrapeWithCheerio(targetUrl: string): Promise<CheerioExtra
       : 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)';
 
     const response = await axios.get(targetUrl, {
-      timeout: 2500,
+      timeout: 4000,
       maxContentLength: 5 * 1024 * 1024,
       httpAgent: sharedHttpAgent,
       httpsAgent: sharedHttpsAgent,
@@ -286,6 +484,10 @@ export async function scrapeWithCheerio(targetUrl: string): Promise<CheerioExtra
     // Author avatar resolution
     const authorAvatar = resolveUrl(jsonLd.authorAvatar, targetUrl);
 
+    // Extract readable article text & classify page intent
+    const { content: articleContent, wordCount: proseWordCount, readingTimeMinutes } = extractArticleContent($);
+    const pageIntent = detectPageIntent($, targetUrl, metaType, jsonLd.type, proseWordCount);
+
     return {
       title,
       rawTitle,
@@ -299,6 +501,11 @@ export async function scrapeWithCheerio(targetUrl: string): Promise<CheerioExtra
       authorAvatar,
       publishedAt,
       type,
+      rawHtml: html,
+      pageIntent,
+      articleContent,
+      wordCount: proseWordCount,
+      readingTimeMinutes,
     };
   } catch (error: any) {
     logger.warn('CheerioScraper', `Error scraping ${targetUrl}:`, error?.message || error);

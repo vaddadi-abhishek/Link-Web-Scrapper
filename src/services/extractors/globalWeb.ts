@@ -1,5 +1,6 @@
 import { PlatformExtractor, ExtractionResult, GlobalWebCardData } from './types';
-import { scrapeWithCheerio } from '../cheerioScraper';
+import * as cheerio from 'cheerio';
+import { scrapeWithCheerio, extractArticleContent, detectPageIntent } from '../cheerioScraper';
 import { playwrightEngine } from '../playwrightEngine';
 import { resolveUrl } from '../../utils/urlFormatter';
 
@@ -16,7 +17,11 @@ const buildGlobalCardData = (
   publishedAt: string | null,
   siteName: string | null,
   type: string | null,
-  snapshot: string | null
+  snapshot: string | null,
+  pageIntent?: string | null,
+  articleContent?: string | null,
+  wordCount?: number | null,
+  readingTimeMinutes?: number | null
 ): GlobalWebCardData => {
   return {
     author: author || null,
@@ -24,6 +29,10 @@ const buildGlobalCardData = (
     site_name: siteName || null,
     type: type || 'website',
     snapshot: snapshot || null,
+    page_intent: pageIntent || null,
+    article_content: articleContent || null,
+    word_count: wordCount !== undefined ? wordCount : null,
+    reading_time_minutes: readingTimeMinutes !== undefined ? readingTimeMinutes : null,
   };
 };
 
@@ -46,7 +55,11 @@ export const globalWebExtractor: PlatformExtractor<GlobalWebCardData> = {
           cheerioData.publishedAt,
           cheerioData.ogSiteName,
           cheerioData.type,
-          snap
+          snap,
+          cheerioData.pageIntent,
+          cheerioData.articleContent,
+          cheerioData.wordCount,
+          cheerioData.readingTimeMinutes
         ),
       };
     }
@@ -55,7 +68,22 @@ export const globalWebExtractor: PlatformExtractor<GlobalWebCardData> = {
     try {
       const pwData = await playwrightEngine.scrape(targetUrl, {
         waitTimeout: 2000,
+        includeHtml: true,
       });
+
+      let articleContent = cheerioData?.articleContent || null;
+      let wordCount = cheerioData?.wordCount || null;
+      let readingTimeMinutes = cheerioData?.readingTimeMinutes || null;
+      let pageIntent = cheerioData?.pageIntent;
+
+      if (!articleContent && pwData.html) {
+        const $pw = cheerio.load(pwData.html);
+        const articleRes = extractArticleContent($pw);
+        articleContent = articleRes.content;
+        wordCount = articleRes.wordCount;
+        readingTimeMinutes = articleRes.readingTimeMinutes;
+        pageIntent = detectPageIntent($pw, targetUrl, pwData.type, null, articleRes.wordCount);
+      }
 
       const snap = pwData.snapshot || cheerioData?.image || null;
       return {
@@ -68,7 +96,11 @@ export const globalWebExtractor: PlatformExtractor<GlobalWebCardData> = {
           pwData.publishedAt || cheerioData?.publishedAt || null,
           pwData.ogSiteName || cheerioData?.ogSiteName || null,
           pwData.type || cheerioData?.type || null,
-          snap
+          snap,
+          pageIntent,
+          articleContent,
+          wordCount,
+          readingTimeMinutes
         ),
       };
     } catch {
@@ -83,7 +115,11 @@ export const globalWebExtractor: PlatformExtractor<GlobalWebCardData> = {
           cheerioData?.publishedAt || null,
           cheerioData?.ogSiteName || null,
           cheerioData?.type || null,
-          snap
+          snap,
+          cheerioData?.pageIntent,
+          cheerioData?.articleContent,
+          cheerioData?.wordCount,
+          cheerioData?.readingTimeMinutes
         ),
       };
     }

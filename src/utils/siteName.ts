@@ -26,6 +26,7 @@ export function deriveSiteName(urlStr: string, ogSiteName?: string | null): stri
     if (host.includes('linkedin.com')) {
       if (pathname.includes('/jobs/')) return 'LinkedIn Job';
       if (pathname.includes('/in/')) return 'LinkedIn Profile';
+      if (pathname.includes('/pulse/') || pathname.includes('/article/')) return 'LinkedIn Article';
       if (pathname.includes('/posts/') || pathname.includes('/feed/')) return 'LinkedIn Post';
       return 'LinkedIn';
     }

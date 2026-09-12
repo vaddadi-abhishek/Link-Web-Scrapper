@@ -551,13 +551,19 @@ export const facebookExtractor: PlatformExtractor<FacebookCardData> = {
         null;
 
       if (!videoUrl) {
-        const mp4Matches = iosHtml.match(/https:[^"'\s\\]+?\.mp4[^"'\s\\]*/gi);
-        if (mp4Matches && mp4Matches[0]) {
-          videoUrl = mp4Matches[0]
+        const mp4Matches = [...iosHtml.matchAll(/https:[^"'\s\\]+?\.mp4[^"'\s\\]*/gi)];
+        for (const m of mp4Matches) {
+          const url = m[0];
+          // Exclude standalone audio streams (e.g. DASH audio stream segments)
+          if (url.includes('dash_ln_heaac') || url.includes('_audio') || url.includes('vbr3_audio')) {
+            continue;
+          }
+          videoUrl = url
             .replace(/\\u0025/g, '%')
             .replace(/\\u0026/g, '&')
             .replace(/\\\//g, '/')
             .replace(/&amp;/g, '&');
+          break;
         }
       }
 

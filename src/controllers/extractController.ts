@@ -90,6 +90,8 @@ export const extractMetadataController = async (req: Request, res: Response): Pr
           type: platform,
           card_data: result.card_data,
           forceRefresh,
+          article_content: (result.card_data as any)?.article_content || null,
+          page_intent: (result.card_data as any)?.page_intent || null,
         });
 
         aiContext = aiAnalysis.ai_context;

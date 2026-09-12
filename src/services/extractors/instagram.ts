@@ -30,6 +30,8 @@ function cleanMediaUrl(raw: string | null): string {
     .replace(/&amp;/g, '&')
     .replace(/\\\//g, '/')
     .replace(/\\/g, '')
+    .replace(/\\?u00253D/gi, '%3D')
+    .replace(/\\?u003C.*$/gi, '')
     .trim();
 }
 
@@ -59,7 +61,7 @@ function sanitizeDescription(raw: string | null, username?: string): string {
   return cleanInstagramText(desc);
 }
 
-function extractInstagramVideo(embedHtml: string, rawHtml?: string): string | null {
+function extractInstagramVideo(embedHtml: string, rawHtml?: string | null): string | null {
   if (embedHtml) {
     // 1. Check for video_url in JSON
     const vMatch = embedHtml.match(/video_url["\\]*:\s*["\\]*(https?:[\\/]+[^"\s<>]+)/i);
@@ -75,12 +77,50 @@ function extractInstagramVideo(embedHtml: string, rawHtml?: string): string | nu
     }
   }
 
-  // 3. Check crawler HTML fallback
+  // 3. Check crawler HTML (Instagram reels format uses video_versions with progressive .mp4)
   if (rawHtml) {
+    // 3a. Parse video_versions JSON array
+    const vvMatches = [...rawHtml.matchAll(/"video_versions"\s*:\s*(\[[^\]]+\])/g)];
+    for (const m of vvMatches) {
+      try {
+        const unescaped = m[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\').replace(/\\\//g, '/');
+        const list = JSON.parse(unescaped);
+        if (Array.isArray(list) && list.length > 0 && list[0].url) {
+          return cleanMediaUrl(list[0].url);
+        }
+      } catch {
+        // Fallback to regex if JSON parse fails
+      }
+    }
+
+    // 3b. video_versions url regex
+    const vvUrlMatch = rawHtml.match(/"video_versions"\s*:\s*\[\s*\{[^}]*?"url"\s*:\s*"([^"]+)"/i);
+    if (vvUrlMatch && vvUrlMatch[1]) {
+      return cleanMediaUrl(vvUrlMatch[1]);
+    }
+
+    // 3c. Direct video_url in crawler JSON
+    const cVMatch = rawHtml.match(/video_url["\\]*:\s*["\\]*(https?:[\\/]+[^"\s<>]+)/i);
+    if (cVMatch && cVMatch[1]) {
+      return cleanMediaUrl(cVMatch[1]);
+    }
+
+    // 3d. Progressive mp4 URL in crawler JSON
+    const progMatch = rawHtml.match(/"url"\s*:\s*"(https?:[\\/]+[^"]+?\.mp4[^"]*?)"/i);
+    if (progMatch && progMatch[1]) {
+      return cleanMediaUrl(progMatch[1]);
+    }
+
+    // 3e. General unescaped .mp4 fallback in crawler (ignoring standalone audio streams)
     const unescapedCrawler = rawHtml.replace(/\\u0026/g, '&').replace(/&amp;/g, '&').replace(/\\\//g, '/').replace(/\\/g, '');
-    const cMp4Match = unescapedCrawler.match(/https?:\/\/[^"'\s<>]+?\.mp4(?:\?[^"'\s<>]+)?/i);
-    if (cMp4Match && cMp4Match[0]) {
-      return cleanMediaUrl(cMp4Match[0]);
+    const cMp4Matches = [...unescapedCrawler.matchAll(/https?:\/\/[^"'\s<>\\]+?\.mp4(?:\?[^"'\s<>\\]+)?/gi)];
+    for (const match of cMp4Matches) {
+      const url = match[0];
+      // Exclude standalone audio streams (e.g. DASH audio stream segments)
+      if (url.includes('dash_ln_heaac') || url.includes('_audio') || url.includes('vbr3_audio')) {
+        continue;
+      }
+      return cleanMediaUrl(url);
     }
   }
 
@@ -175,6 +215,26 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
     const mediaList: MediaItem[] = [];
     let embedAvatar: string | null = null;
     let embedHtml = '';
+    let crawlerHtml: string | null = cheerioData?.rawHtml || null;
+
+    // Resilient fallback: If crawler HTML was not captured by scrapeWithCheerio, fetch directly
+    if (!crawlerHtml && shortcode) {
+      try {
+        const crawlerRes = await axios.get(normalizedUrl, {
+          headers: {
+            'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+          },
+          timeout: 4000,
+        });
+        if (typeof crawlerRes.data === 'string') {
+          crawlerHtml = crawlerRes.data;
+        }
+      } catch {
+        // Continue with available data
+      }
+    }
 
     if (shortcode) {
       try {
@@ -245,20 +305,13 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
 
         // 2. If not a carousel, extract Video or Single Image
         if (mediaList.length === 0) {
-          const isVideoPost =
-            targetUrl.includes('/reel/') ||
-            targetUrl.includes('/reels/') ||
-            embedHtml.includes('"is_video":true') ||
-            embedHtml.includes('\\"is_video\\":true') ||
-            embedHtml.includes('video_url');
-
-          const videoUrl = extractInstagramVideo(embedHtml, (cheerioData as any)?.rawHtml);
+          const videoUrl = extractInstagramVideo(embedHtml, crawlerHtml);
           if (videoUrl) {
             mediaList.push({ type: 'video', url: videoUrl });
           }
 
-          // Only extract single post image if this is NOT a video post
-          if (mediaList.length === 0 && !isVideoPost) {
+          // Fallback to single post/reel cover image if video is not available or if it's an image post
+          if (mediaList.length === 0) {
             const embedImg = $embed('.Content.EmbedFrame img.EmbeddedMediaImage, .Content.EmbedFrame .EmbeddedMedia img').attr('src');
             if (embedImg) {
               mediaList.push({ type: 'image', url: cleanMediaUrl(embedImg) });

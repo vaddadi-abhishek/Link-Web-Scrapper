@@ -62,6 +62,11 @@ export interface LinkedInCardData {
   };
   media: MediaItem[];
   posted_at: string | null;
+  type?: string | null;
+  page_intent?: string | null;
+  article_content?: string | null;
+  word_count?: number | null;
+  reading_time_minutes?: number | null;
 }
 
 export interface RedditCardData {
@@ -97,6 +102,10 @@ export interface GlobalWebCardData {
   site_name: string | null;
   type: string | null;
   snapshot: string | null;
+  page_intent?: string | null;
+  article_content?: string | null;
+  word_count?: number | null;
+  reading_time_minutes?: number | null;
 }
 
 export interface ExtractionResult<T = any> {

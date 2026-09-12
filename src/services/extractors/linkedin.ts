@@ -2,10 +2,21 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { PlatformExtractor, ExtractionResult, LinkedInCardData, MediaItem } from './types';
 import { playwrightEngine } from '../playwrightEngine';
-import { cleanDescription } from '../../utils/textCleaner';
+import { cleanTitle, cleanDescription } from '../../utils/textCleaner';
 import { parseFormattedNumber } from '../../utils/numberParser';
+import { extractArticleContent } from '../cheerioScraper';
 
 const LINKEDIN_LOGO_URL = 'https://static.licdn.com/aero-v1/sc/h/al2o9zrvru7aqj8e1x2rzsrca';
+
+export function isLinkedInArticleUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const path = parsed.pathname.toLowerCase();
+    return path.includes('/pulse/') || path.includes('/article/');
+  } catch {
+    return false;
+  }
+}
 
 function cleanLinkedInText(text: string | null): string {
   if (!text) return '';
@@ -16,10 +27,10 @@ function cleanLinkedInText(text: string | null): string {
 }
 
 function extractNameFromUrlSlug(url: string): string | null {
-  const match = url.match(/\/posts\/([a-zA-Z0-9-]+)_/i);
+  const match = url.match(/\/(?:posts|pulse)\/([a-zA-Z0-9-]+?)(?:_[a-z0-9]+|-activity|-vanderburg|-9vkfc|\/|$)/i);
   if (match && match[1]) {
     const raw = match[1].replace(/-/g, ' ').trim();
-    if (raw) {
+    if (raw && raw.length > 2 && raw.length < 50) {
       return raw.replace(/\b\w/g, (c) => c.toUpperCase());
     }
   }
@@ -62,6 +73,8 @@ function parseLinkedInJsonLd(html: string): {
   reactions: number;
   comments: number;
   reposts: number;
+  isArticleType: boolean;
+  headline: string | null;
 } {
   let authorName: string | null = null;
   let authorAvatar: string | null = null;
@@ -73,6 +86,8 @@ function parseLinkedInJsonLd(html: string): {
   let reactions = 0;
   let comments = 0;
   let reposts = 0;
+  let isArticleType = false;
+  let headline: string | null = null;
 
   try {
     const $ = cheerio.load(html);
@@ -80,10 +95,20 @@ function parseLinkedInJsonLd(html: string): {
       try {
         const json = JSON.parse($(s).text() || '{}');
         const type = json['@type'] || '';
+        const isArticleSchema = type === 'Article' || type === 'BlogPosting' || type === 'NewsArticle';
+        if (isArticleSchema) {
+          isArticleType = true;
+          if (json.headline && typeof json.headline === 'string') {
+            headline = json.headline.trim();
+          }
+        }
+
         if (
           type === 'SocialMediaPosting' ||
           type === 'VideoObject' ||
           type === 'Article' ||
+          type === 'BlogPosting' ||
+          type === 'NewsArticle' ||
           type === 'DiscussionForumPosting'
         ) {
           if (json.creator?.name || json.author?.name) {
@@ -215,6 +240,8 @@ function parseLinkedInJsonLd(html: string): {
     reactions,
     comments,
     reposts,
+    isArticleType,
+    headline,
   };
 }
 
@@ -233,6 +260,12 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
     let reposts = 0;
     const mediaList: MediaItem[] = [];
 
+    let isArticle = isLinkedInArticleUrl(targetUrl);
+    let articleTitle: string | null = null;
+    let articleContent: string | null = null;
+    let wordCount: number | null = null;
+    let readingTimeMinutes: number | null = null;
+
     // -------------------------------------------------------------
     // Tier 1: Fast-Path Axios & Cheerio with LinkedInBot Headers (~250ms)
     // -------------------------------------------------------------
@@ -243,7 +276,7 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         },
         maxRedirects: 5,
-        timeout: 3500,
+        timeout: 4000,
       });
 
       if (res && res.data) {
@@ -259,6 +292,10 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
         comments = parsed.comments;
         reposts = parsed.reposts;
 
+        if (parsed.isArticleType) {
+          isArticle = true;
+        }
+
         const $ = cheerio.load(res.data);
         const ogDesc = $('meta[property="og:description"]').attr('content') || $('meta[name="description"]').attr('content');
         const ogImage = $('meta[property="og:image"]').attr('content') || $('meta[name="twitter:image"]').attr('content');
@@ -266,6 +303,17 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
 
         if (!description && ogDesc) description = ogDesc;
         if (!snapshot && ogImage) snapshot = ogImage;
+
+        if (isArticle) {
+          const rawTitle = ogTitle || $('title').text() || parsed.headline || null;
+          if (rawTitle) {
+            articleTitle = rawTitle.replace(/\s*\|\s*LinkedIn.*$/i, '').trim();
+          }
+          const articleRes = extractArticleContent($);
+          articleContent = articleRes.content;
+          wordCount = articleRes.wordCount;
+          readingTimeMinutes = articleRes.readingTimeMinutes;
+        }
 
         if (!authorName) {
           const match = ogTitle.match(/\|\s*([^|]+)$/);
@@ -305,6 +353,7 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
 
         if (pwResult.customData?.html) {
           const parsed = parseLinkedInJsonLd(pwResult.customData.html);
+          if (parsed.isArticleType) isArticle = true;
           if (parsed.authorName) authorName = parsed.authorName;
           if (parsed.authorAvatar) authorAvatar = parsed.authorAvatar;
           if (parsed.description) description = parsed.description;
@@ -315,6 +364,18 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
           if (parsed.reactions) reactions = parsed.reactions;
           if (parsed.comments) comments = parsed.comments;
           if (parsed.reposts) reposts = parsed.reposts;
+
+          if (isArticle && !articleContent) {
+            const $pw = cheerio.load(pwResult.customData.html);
+            const rawTitle = $pw('meta[property="og:title"]').attr('content') || $pw('title').text() || parsed.headline || null;
+            if (rawTitle && !articleTitle) {
+              articleTitle = rawTitle.replace(/\s*\|\s*LinkedIn.*$/i, '').trim();
+            }
+            const articleRes = extractArticleContent($pw);
+            articleContent = articleRes.content;
+            wordCount = articleRes.wordCount;
+            readingTimeMinutes = articleRes.readingTimeMinutes;
+          }
         }
 
         if (Array.isArray(pwResult.customData?.images) && extractedImages.length === 0) {
@@ -331,7 +392,7 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
 
     // Resolve author name fallback
     if (!authorName || authorName === 'LinkedIn User' || authorName.toLowerCase().includes('linkedin')) {
-      authorName = extractNameFromUrlSlug(targetUrl) || 'LinkedIn Member';
+      authorName = extractNameFromUrlSlug(targetUrl) || (isArticle ? 'LinkedIn Author' : 'LinkedIn Member');
     }
 
     // Fallback avatar if still not found
@@ -339,7 +400,7 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
       authorAvatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(authorName)}&background=0a66c2&color=fff&size=200&bold=true`;
     }
 
-    // Assemble clean media list (Strictly post media: video or post snapshot, NO profile avatars or banners)
+    // Assemble clean media list (Strictly post/article media: video or snapshot, NO profile avatars or banners)
     if (videoUrl) {
       mediaList.push({ type: 'video', url: videoUrl });
     }
@@ -357,11 +418,11 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
     const finalDescription = description ? cleanLinkedInText(cleanDescription(description)) : '';
 
     return {
-      title: null, // Always keep title as null for LinkedIn
+      title: isArticle ? (articleTitle ? cleanTitle(articleTitle) : null) : null,
       description: finalDescription,
       snapshot: primarySnapshot,
       logo: LINKEDIN_LOGO_URL,
-      ogSiteName: 'LinkedIn',
+      ogSiteName: isArticle ? 'LinkedIn Article' : 'LinkedIn',
       card_data: {
         author: {
           name: authorName,
@@ -374,6 +435,15 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
         },
         media: mediaList,
         posted_at: publishedAt || new Date().toISOString(),
+        ...(isArticle
+          ? {
+              type: 'article',
+              page_intent: 'article',
+              article_content: articleContent,
+              word_count: wordCount,
+              reading_time_minutes: readingTimeMinutes,
+            }
+          : {}),
       },
     };
   },
