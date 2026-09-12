@@ -20,6 +20,7 @@ export interface AIVisualAnalysisInput {
 
 export interface AIVisualAnalysisResult {
   ai_context: string | null;
+  ai_category?: string[];
   ai_tags: string[];
   visual_entities?: string[];
   ocr_text?: string;
@@ -170,7 +171,7 @@ function buildFallbackAnalysis(input: AIVisualAnalysisInput, reason?: string): A
   if (input.site_name) tagsSet.add(input.site_name.toLowerCase().replace(/[^a-z0-9]/g, ''));
 
   // Common keywords heuristic
-  const keywordMatches = combinedText.match(/\b(actor|actress|movie|job|hiring|role|engineer|developer|tech|design|remote|salaries|career|news)\b/gi);
+  const keywordMatches = combinedText.match(/\b(celebrity|player|athlete|musician|singer|artist|creator|influencer|streamer|youtuber|founder|ceo|director|politician|movie|film|sports|job|hiring|role|engineer|developer|tech|design|remote|salaries|career|news)\b/gi);
   if (keywordMatches) {
     keywordMatches.forEach((k) => tagsSet.add(k.toLowerCase().replace(/\s+/g, '-')));
   }
@@ -181,12 +182,23 @@ function buildFallbackAnalysis(input: AIVisualAnalysisInput, reason?: string): A
     hashtags.forEach((h) => tagsSet.add(h.replace('#', '').toLowerCase()));
   }
 
+  const categoriesSet = new Set<string>();
+  if (input.type) categoriesSet.add(input.type.toLowerCase());
+  if (input.site_name) categoriesSet.add(input.site_name.toLowerCase().replace(/[^a-z0-9]/g, ''));
+  if (keywordMatches) {
+    keywordMatches.slice(0, 3).forEach((k) => categoriesSet.add(k.toLowerCase().replace(/\s+/g, ' ')));
+  }
+  if (categoriesSet.size === 0) {
+    categoriesSet.add('general');
+  }
+
   const fallbackContext = parts.length > 0
     ? `Content Summary: ${parts.join(' | ')}.`
     : `Saved link from ${input.site_name || input.url}.`;
 
   return {
     ai_context: fallbackContext,
+    ai_category: Array.from(categoriesSet).slice(0, 5),
     ai_tags: Array.from(tagsSet).slice(0, 10),
     visual_entities: [],
     ocr_text: '',
@@ -251,6 +263,7 @@ export async function analyzeVisualContext(input: AIVisualAnalysisInput): Promis
     logger.info('AIVisualService', `Instagram login wall / restricted media detected for "${input.url}". Skipping AI API call.`);
     const res = {
       ai_context: null,
+      ai_category: ['instagram'],
       ai_tags: ['instagram'],
     };
     aiCache.set(cacheKey, res);
@@ -260,9 +273,11 @@ export async function analyzeVisualContext(input: AIVisualAnalysisInput): Promis
   // Non-Instagram Explicit Login Wall check
   if (isExplicitLoginWall && !descText) {
     logger.info('AIVisualService', `Login wall detected for "${input.url}". Skipping AI API call.`);
+    const fallbackCat = [input.site_name?.toLowerCase().replace(/[^a-z0-9]/g, '') || input.type || 'bookmark'].filter(Boolean);
     const res = {
       ai_context: null,
-      ai_tags: [input.site_name?.toLowerCase().replace(/[^a-z0-9]/g, '') || input.type || 'bookmark'].filter(Boolean),
+      ai_category: fallbackCat,
+      ai_tags: fallbackCat,
     };
     aiCache.set(cacheKey, res);
     return res;
@@ -337,13 +352,21 @@ export async function analyzeVisualContext(input: AIVisualAnalysisInput): Promis
       intentSpecificRules = `
 ARTICLE MODE RULES:
 - The bookmark is an article or essay. Focus strictly on the written thesis, main arguments, and key insights in the Title, Description, and Article Body Excerpt.
+- Rely strictly on the provided text. Do not invent, assume, or speculate details not supported by the written content.
+- In 'ai_category', assign 2-5 natural categories derived explicitly and exclusively from the written article text and subject matter. Keep anti-hallucination constraint strictly active.
 - In 'ai_context', synthesize what the article is about, its core message, author's perspective, and practical takeaways in 2-4 clear sentences.
 - In 'ai_tags', provide 4-8 high-signal conceptual tags reflecting the core topics, themes, and domains (e.g. competitiveness, psychology, fomo, career, decision-making).
 - In 'visual_entities', return [] (empty array) since no images are analyzed.
 - In 'ocr_text', return "" (empty string).
 `.trim();
-    } else if (isSocialMedia && isVideo) {
-      mediaContextDescription = `This bookmark is a ${socialPlatform || 'social media'} video/clip/reel. The attached visual represents the video poster/keyframe thumbnail. Combine this keyframe visual with the post caption, description, and metadata.`;
+    } else if (isSocialMedia) {
+      mediaContextDescription = `This bookmark is a ${socialPlatform || 'social media'} ${isVideo ? 'video/clip/reel' : 'post'}. The attached visual represents the ${isVideo ? 'video poster/keyframe thumbnail' : 'primary post image'}.`;
+      intentSpecificRules = `
+SOCIAL MEDIA & VISUAL RECOGNITION RULES:
+- Social media captions are often brief, informal, or teaser text.
+- Do NOT be restricted by vague captions. Actively recognize the person or subject in the image/keyframe using your world knowledge of public figures, athletes, creators, influencers and celebrities.
+- Use visual cues like faces, uniforms, jerseys, team logos, event stages, and subtitles to identify the exact individual (e.g. Divya Deshmukh, Lionel Messi, Sam Altman) even if their name isn't written in the caption text.
+`.trim();
     } else if (isVideo) {
       mediaContextDescription = 'This bookmark is a video/clip/reel. The attached visual represents the video poster/keyframe thumbnail. Combine this keyframe visual with the post caption, description, and text.';
     } else if (pageIntent === 'auth_or_portal') {
@@ -371,7 +394,7 @@ DEVELOPER TOOL / RESOURCE MODE:
 
     const promptText = `
 You are an advanced AI Intelligence system for a smart bookmarking platform.
-Your job is to analyze the content alongside textual metadata.
+Your job is to analyze the content alongside textual metadata and visual keyframes.
 ${mediaContextDescription}
 
 Bookmark Title: "${input.title || ''}"
@@ -379,22 +402,32 @@ Bookmark Description: "${input.description || ''}"
 Platform/Source: "${input.site_name || input.type || ''}"
 URL: "${input.url}"
 ${articleSection}
-CRITICAL ANTI-HALLUCINATION RULES:
-- Rely strictly on the attached metadata and verified text.
-- IF NO VALID IMAGE IS ATTACHED and metadata is generic or missing (e.g. login wall or restricted page), DO NOT invent, guess, or hallucinate specific TV shows, movies, actors, or fictional events based on URL shortcodes.
-- If visual media is unavailable or restricted, state clearly that the bookmark is a saved link from ${input.site_name || 'the platform'} where media content was restricted by login, and generate relevant generic tags.
 ${intentSpecificRules ? `\n${intentSpecificRules}\n` : ''}
 Requirements:
-1. **Content & Entity Recognition**: Examine textual information (and visual media if attached). For articles, prioritize the written thesis and key takeaways. For UI tools, examine the interface components.
-2. **Context Synthesis**: Synthesize what is happening (topics, thesis, actions, on-screen text, job notifications, captions, or article arguments).
-3. **Synthesize Rich AI Context**: Write a detailed, highly informative, 2-4 sentence context paragraph blending conceptual insights, key arguments, and background knowledge. Ensure key search terms are naturally included.
-4. **Auto-Tagging**: Return a clean array of 4-10 concise tags (lowercase, hyphenated for multi-words, no # prefix) capturing the true subject matter.
+1. **Dynamic Multi-Categorization ('ai_category')**:
+   - Assign an array of 2-5 relevant categories reflecting what the bookmark represents.
+   - The categorization MUST be dynamic, unbiased, and determined organically by AI based on what the content actually represents.
+   - Categorize across multiple granularities: encompass broad overarching domains as well as specific classifications, topics, roles, or themes.
+   - For public figures, players, creators, or professionals, include appropriate general and specific role/domain categories (e.g. broad field alongside specific role or nationality/sport classification).
+   - ARTICLE CONSTRAINT: For articles, categorization must be derived strictly and exclusively from the provided 'article_content'. Keep the anti-hallucination constraint strictly active.
+2. **Celebrity & Public Figure Identification**:
+   - Actively identify and recognize ANY celebrity, public figure, or notable internet personality appearing in the visual media or referenced in the text.
+   - This covers all public figures across the known internet, including: actors, actresses, athletes & sports stars (football, basketball, cricket, F1, tennis, MMA, etc.), musicians & singers, content creators & YouTubers, streamers, tech founders, CEOs, directors, authors, journalists, politicians, models, and viral internet personalities.
+   - Whenever a recognizable celebrity or public figure is identified:
+     * Add their full canonical name to "visual_entities" (e.g. "Lionel Messi", "Taylor Swift", "Keanu Reeves", "MrBeast", "Sam Altman").
+     * Include their name, profession/field, and relevant context in "ai_tags" (e.g. "lionel-messi", "football", "inter-miami", "athlete").
+     * Highlight who they are, what they are doing, wearing, announcing, or discussing in the "ai_context".
+3. **Content & Entity Recognition**: Examine textual information, on-screen text, brand logos, products, locations, and media context. For articles, prioritize the written thesis and key takeaways.
+4. **Synthesize Rich AI Context**: Write a detailed, highly informative, 2-4 sentence context paragraph blending factual entity recognition, actions, quotes/captions, and background context. Ensure names and search terms are naturally included.
+5. **Auto-Tagging**: Return a clean array of 4-10 concise tags (lowercase, hyphenated for multi-words, no # prefix) capturing the person's name, category, domain, and core topic.
+6. **OCR & Text Extraction**: Extract any prominent text, captions, or headlines visible in the visual media into "ocr_text".
 
 Return strictly valid JSON in this exact structure:
 {
-  "ai_context": "Rich detailed synthesis paragraph...",
-  "ai_tags": ["tag1", "tag2", "tag3"],
-  "visual_entities": ["Entity 1", "Entity 2"],
+  "ai_context": "Rich detailed synthesis paragraph naming the person, context, and key details...",
+  "ai_category": ["broad category", "specific category 1", "specific category 2"],
+  "ai_tags": ["celebrity-name", "domain", "topic1", "topic2"],
+  "visual_entities": ["Full Celebrity Name", "Location/Entity 2"],
   "ocr_text": "Extracted text..."
 }
 `.trim();
@@ -490,12 +523,19 @@ Return strictly valid JSON in this exact structure:
     // Clean JSON response if wrapped in markdown code blocks
     const cleanedJsonStr = responseText.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
     const parsed = JSON.parse(cleanedJsonStr);
+    const rawCategories = Array.isArray(parsed.ai_category) ? parsed.ai_category : [];
+    const cleanCategories = rawCategories
+      .map((c: any) => String(c || '').trim().toLowerCase())
+      .filter((c: string) => c.length > 0 && c.length < 60);
+
+    const fallback = buildFallbackAnalysis(input);
 
     const result: AIVisualAnalysisResult = {
-      ai_context: parsed.ai_context || buildFallbackAnalysis(input).ai_context,
+      ai_context: parsed.ai_context || fallback.ai_context,
+      ai_category: cleanCategories.length > 0 ? cleanCategories : (fallback.ai_category || []),
       ai_tags: Array.isArray(parsed.ai_tags) && parsed.ai_tags.length > 0
         ? parsed.ai_tags
-        : buildFallbackAnalysis(input).ai_tags,
+        : fallback.ai_tags,
       visual_entities: Array.isArray(parsed.visual_entities) ? parsed.visual_entities : [],
       ocr_text: typeof parsed.ocr_text === 'string' ? parsed.ocr_text : '',
     };

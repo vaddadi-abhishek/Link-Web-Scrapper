@@ -461,8 +461,8 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
         title && title !== 'Instagram Post'
           ? title
           : username !== 'unknown'
-          ? `Post by @${username} on Instagram`
-          : 'Instagram Post',
+            ? `Post by @${username} on Instagram`
+            : 'Instagram Post',
       description: description || '',
       snapshot: finalSnapshot,
       logo: INSTAGRAM_LOGO_URL,

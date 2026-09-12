@@ -21,7 +21,12 @@ function mapBookmarkRow(row: any) {
 
   // If ai_context record exists for this bookmark, resolve ai_status to 'completed'
   const hasAiContext = Boolean(
-    aiCtx && (aiCtx.context || (Array.isArray(aiCtx.ai_tags) && aiCtx.ai_tags.length > 0) || aiCtx.ocr_text)
+    aiCtx && (
+      aiCtx.context ||
+      (Array.isArray(aiCtx.ai_category) && aiCtx.ai_category.length > 0) ||
+      (Array.isArray(aiCtx.ai_tags) && aiCtx.ai_tags.length > 0) ||
+      aiCtx.ocr_text
+    )
   );
   const resolvedStatus = hasAiContext ? 'completed' : (row.ai_status || 'pending_manual');
 
@@ -39,6 +44,7 @@ function mapBookmarkRow(row: any) {
     ai_status: resolvedStatus,
     created_at: row.created_at,
     ai_context: aiCtx?.context || null,
+    ai_category: Array.isArray(aiCtx?.ai_category) ? aiCtx.ai_category : [],
     ai_tags: aiCtx?.ai_tags || [],
     visual_entities: aiCtx?.visual_entities || [],
     ocr_text: aiCtx?.ocr_text || '',
@@ -61,7 +67,13 @@ async function findExistingCompletedBookmarkByUrl(urls: string[]) {
 
     if (data) {
       const ctx = Array.isArray(data.ai_context) ? data.ai_context[0] : data.ai_context;
-      if (ctx && (ctx.context || (Array.isArray(ctx.ai_tags) && ctx.ai_tags.length > 0) || ctx.ocr_text)) {
+      if (
+        ctx &&
+        (ctx.context ||
+          (Array.isArray(ctx.ai_category) && ctx.ai_category.length > 0) ||
+          (Array.isArray(ctx.ai_tags) && ctx.ai_tags.length > 0) ||
+          ctx.ocr_text)
+      ) {
         return { bookmark: data, aiContext: ctx };
       }
     }
@@ -184,6 +196,7 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
       aiStatus = 'completed';
       aiAnalysisResult = {
         ai_context: existingGlobal.aiContext.context || '',
+        ai_category: existingGlobal.aiContext.ai_category || [],
         ai_tags: existingGlobal.aiContext.ai_tags || [],
         visual_entities: existingGlobal.aiContext.visual_entities || [],
         ocr_text: existingGlobal.aiContext.ocr_text || '',
@@ -270,6 +283,7 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
           bookmark_id: bookmarkRow.id,
           user_id: userId,
           context: aiAnalysisResult.ai_context || '',
+          ai_category: aiAnalysisResult.ai_category || [],
           ai_tags: aiAnalysisResult.ai_tags || [],
           visual_entities: aiAnalysisResult.visual_entities || [],
           ocr_text: aiAnalysisResult.ocr_text || '',
@@ -337,6 +351,7 @@ export async function generateAiForBookmarkController(req: AuthenticatedRequest,
             bookmark_id: bookmarkId,
             user_id: userId,
             context: existingGlobal.aiContext.context || '',
+            ai_category: existingGlobal.aiContext.ai_category || [],
             ai_tags: existingGlobal.aiContext.ai_tags || [],
             visual_entities: existingGlobal.aiContext.visual_entities || [],
             ocr_text: existingGlobal.aiContext.ocr_text || '',
@@ -412,6 +427,7 @@ export async function generateAiForBookmarkController(req: AuthenticatedRequest,
             bookmark_id: bookmarkId,
             user_id: userId,
             context: aiAnalysis.ai_context,
+            ai_category: aiAnalysis.ai_category || [],
             ai_tags: aiAnalysis.ai_tags || [],
             visual_entities: aiAnalysis.visual_entities || [],
             ocr_text: aiAnalysis.ocr_text || '',

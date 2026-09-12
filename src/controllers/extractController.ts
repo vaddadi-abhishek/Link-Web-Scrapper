@@ -69,6 +69,7 @@ export const extractMetadataController = async (req: Request, res: Response): Pr
     const siteName = deriveSiteName(canonicalUrl, result.ogSiteName);
 
     let aiContext: string | null = null;
+    let aiCategory: string[] = [];
     let aiTags: string[] = [];
     let visualEntities: string[] = [];
     let ocrText = '';
@@ -95,6 +96,7 @@ export const extractMetadataController = async (req: Request, res: Response): Pr
         });
 
         aiContext = aiAnalysis.ai_context;
+        aiCategory = aiAnalysis.ai_category || [];
         aiTags = aiAnalysis.ai_tags || [];
         visualEntities = aiAnalysis.visual_entities || [];
         ocrText = aiAnalysis.ocr_text || '';
@@ -113,6 +115,7 @@ export const extractMetadataController = async (req: Request, res: Response): Pr
       site_name: siteName,
       card_data: result.card_data,
       ai_context: aiContext,
+      ai_category: aiCategory,
       ai_tags: aiTags,
       visual_entities: visualEntities,
       ocr_text: ocrText,
