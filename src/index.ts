@@ -3,6 +3,8 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import extractRouter from './routes/extract';
 import proxyRouter from './routes/proxy';
+import bookmarkRouter from './routes/bookmarks';
+import authRouter from './routes/auth';
 import { initializeHttpClient } from './utils/httpClient';
 import { logger } from './utils/logger';
 import { playwrightEngine } from './services/playwrightEngine';
@@ -18,8 +20,14 @@ const PORT = process.env.PORT || 3000;
 // Security & Performance
 app.disable('x-powered-by');
 
-// Middleware
-app.use(cors());
+// Middleware - Allow CORS with custom headers including X-Auto-AI-Context
+app.use(
+  cors({
+    origin: true,
+    credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Auto-AI-Context', 'Prefer'],
+  })
+);
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -29,6 +37,8 @@ app.get('/health', (_req: Request, res: Response) => {
 });
 
 // API Routes
+app.use('/api/v1/auth', authRouter);
+app.use('/api/v1', bookmarkRouter);
 app.use('/api/v1', extractRouter);
 app.use('/api/v1', proxyRouter);
 

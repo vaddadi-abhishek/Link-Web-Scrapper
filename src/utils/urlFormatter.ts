@@ -98,7 +98,7 @@ export function canonicalizeUrl(rawUrl: string): string {
 
       const tweetMatch = pathname.match(/\/([a-zA-Z0-9_]+)\/status\/(\d+)/i);
       if (tweetMatch) {
-        pathname = `/${tweetMatch[1]}/status/${tweetMatch[2]}`;
+        pathname = `/${tweetMatch[1].toLowerCase()}/status/${tweetMatch[2]}`;
         urlObj.search = '';
       } else {
         for (const param of Array.from(urlObj.searchParams.keys())) {
