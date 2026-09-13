@@ -76,11 +76,14 @@ export const extractMetadataController = async (req: Request, res: Response): Pr
 
     if (isAiEnabled) {
       try {
+        const cardDataObj = typeof result.card_data === 'object' && result.card_data !== null
+          ? (result.card_data as Record<string, unknown>)
+          : {};
+        const mediaList = Array.isArray(cardDataObj.media) ? (cardDataObj.media as Array<{ url?: string }>) : [];
         const candidateSnapshot =
           result.snapshot ||
-          (result.card_data as any)?.snapshot ||
-          (result.card_data as any)?.media?.[0]?.url ||
-          null;
+          (typeof cardDataObj.snapshot === 'string' ? cardDataObj.snapshot : null) ||
+          (mediaList[0]?.url || null);
 
         const aiAnalysis = await analyzeVisualContext({
           url: canonicalUrl,
@@ -91,8 +94,8 @@ export const extractMetadataController = async (req: Request, res: Response): Pr
           type: platform,
           card_data: result.card_data,
           forceRefresh,
-          article_content: (result.card_data as any)?.article_content || null,
-          page_intent: (result.card_data as any)?.page_intent || null,
+          article_content: typeof cardDataObj.article_content === 'string' ? cardDataObj.article_content : null,
+          page_intent: typeof cardDataObj.page_intent === 'string' ? cardDataObj.page_intent : null,
         });
 
         aiContext = aiAnalysis.ai_context;
@@ -100,8 +103,9 @@ export const extractMetadataController = async (req: Request, res: Response): Pr
         aiTags = aiAnalysis.ai_tags || [];
         visualEntities = aiAnalysis.visual_entities || [];
         ocrText = aiAnalysis.ocr_text || '';
-      } catch (aiErr: any) {
-        logger.warn('ExtractController', 'AI Visual analysis failed:', aiErr?.message || aiErr);
+      } catch (aiErr: unknown) {
+        const message = aiErr instanceof Error ? aiErr.message : String(aiErr);
+        logger.warn('ExtractController', 'AI Visual analysis failed:', message);
       }
     }
 
@@ -130,8 +134,9 @@ export const extractMetadataController = async (req: Request, res: Response): Pr
       ...fullResponse,
       ...(cached ? { cached: true } : {}),
     });
-  } catch (error: any) {
-    logger.error('ExtractController', 'Extraction error:', error?.message || error);
-    res.status(500).json({ error: error.message || 'Failed to extract metadata' });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error('ExtractController', 'Extraction error:', message);
+    res.status(500).json({ error: message || 'Failed to extract metadata' });
   }
 };

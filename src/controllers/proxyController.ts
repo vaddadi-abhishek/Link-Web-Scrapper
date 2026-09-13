@@ -46,8 +46,9 @@ export const imageProxyController = async (req: Request, res: Response): Promise
       }
     });
 
-    proxyRes.data.on('error', (err: any) => {
-      logger.warn('ProxyController', `Upstream stream error for ${trimmedUrl.substring(0, 60)}:`, err?.message || err);
+    proxyRes.data.on('error', (err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.warn('ProxyController', `Upstream stream error for ${trimmedUrl.substring(0, 60)}:`, message);
       if (!res.headersSent) {
         res.status(500).json({ error: 'Failed during image streaming' });
       }
@@ -55,8 +56,9 @@ export const imageProxyController = async (req: Request, res: Response): Promise
 
     // Pipe the image stream directly to the client
     proxyRes.data.pipe(res);
-  } catch (error: any) {
-    logger.warn('ProxyController', `Image proxy error for ${trimmedUrl.substring(0, 60)}:`, error?.message || error);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn('ProxyController', `Image proxy error for ${trimmedUrl.substring(0, 60)}:`, message);
     if (!res.headersSent) {
       res.status(500).json({ error: 'Failed to proxy image' });
     }

@@ -111,8 +111,9 @@ export const youtubeExtractor: PlatformExtractor<YouTubeCardData> = {
           likes = parseInt(micro.likeCount, 10);
         }
         publishedAt = micro?.publishDate || micro?.uploadDate || null;
-      } catch (error) {
-        console.error(`[youtubeExtractor] youtubei error for ${videoId}:`, error);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.warn('YouTubeExtractor', `YouTubei error for ${videoId}:`, message);
       }
     }
 
@@ -123,8 +124,9 @@ export const youtubeExtractor: PlatformExtractor<YouTubeCardData> = {
         if (!title) title = res.data?.title || null;
         if (!channelName) channelName = res.data?.author_name || null;
         if (!channelUrl) channelUrl = res.data?.author_url || null;
-      } catch (error) {
-        console.error(`[youtubeExtractor] oEmbed error for ${targetUrl}:`, error);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.warn('YouTubeExtractor', `oEmbed error for ${targetUrl}:`, message);
       }
     }
 

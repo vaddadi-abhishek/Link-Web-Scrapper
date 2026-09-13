@@ -1,9 +1,9 @@
 import { Response } from 'express';
 import { AuthenticatedRequest } from '../middleware/authMiddleware';
-import { dispatchExtraction } from '../services/extractors';
+import { dispatchExtraction, ExtractionResult } from '../services/extractors';
 import { deriveSiteName } from '../utils/siteName';
 import { validateUrlAgainstSSRF } from '../utils/ssrfValidator';
-import { analyzeVisualContext } from '../services/aiVisualService';
+import { analyzeVisualContext, AIVisualAnalysisResult } from '../services/aiVisualService';
 import { canonicalizeUrl } from '../utils/urlFormatter';
 import { logger } from '../utils/logger';
 import { supabaseAdmin } from '../utils/supabaseClient';
@@ -13,10 +13,55 @@ import {
   deductOneAiCredit,
 } from '../services/subscriptionService';
 
+export interface AiContextDbRow {
+  context?: string | null;
+  ai_category?: string[] | null;
+  ai_tags?: string[] | null;
+  visual_entities?: string[] | null;
+  ocr_text?: string | null;
+}
+
+export interface BookmarkDbRow {
+  id: string;
+  user_id: string;
+  url: string;
+  title?: string | null;
+  description?: string | null;
+  snapshot_url?: string | null;
+  logo_url?: string | null;
+  site_name?: string | null;
+  type?: string | null;
+  card_data?: Record<string, unknown> | null;
+  ai_status?: 'completed' | 'pending_manual' | 'no_credits' | 'failed' | string;
+  created_at: string;
+  ai_context?: AiContextDbRow | AiContextDbRow[] | null;
+}
+
+export interface BookmarkResponse {
+  id: string;
+  user_id: string;
+  url: string;
+  title: string;
+  description: string;
+  snapshot: string | null;
+  logo: string | null;
+  site_name: string;
+  type: string;
+  card_data?: Record<string, unknown>;
+  ai_status: string;
+  created_at: string;
+  ai_context: string | null;
+  ai_category: string[];
+  ai_tags: string[];
+  visual_entities: string[];
+  ocr_text: string;
+  already_exists?: boolean;
+}
+
 /**
  * Maps database row to standard frontend Bookmark interface.
  */
-function mapBookmarkRow(row: any) {
+function mapBookmarkRow(row: BookmarkDbRow): BookmarkResponse {
   const aiCtx = Array.isArray(row.ai_context) ? row.ai_context[0] : row.ai_context;
 
   // If ai_context record exists for this bookmark, resolve ai_status to 'completed'
@@ -74,11 +119,12 @@ async function findExistingCompletedBookmarkByUrl(urls: string[]) {
           (Array.isArray(ctx.ai_tags) && ctx.ai_tags.length > 0) ||
           ctx.ocr_text)
       ) {
-        return { bookmark: data, aiContext: ctx };
+        return { bookmark: data as BookmarkDbRow, aiContext: ctx as AiContextDbRow };
       }
     }
-  } catch (err: any) {
-    logger.warn('BookmarkController', 'Error checking completed bookmark by URL:', err?.message || err);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.warn('BookmarkController', 'Error checking completed bookmark by URL:', message);
   }
   return null;
 }
@@ -104,10 +150,11 @@ export async function getBookmarksController(req: AuthenticatedRequest, res: Res
       return;
     }
 
-    const formatted = (data || []).map(mapBookmarkRow);
+    const formatted = ((data || []) as BookmarkDbRow[]).map(mapBookmarkRow);
     res.status(200).json(formatted);
-  } catch (err: any) {
-    logger.error('BookmarkController', 'Error in getBookmarks:', err?.message || err);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error('BookmarkController', 'Error in getBookmarks:', message);
     res.status(500).json({ error: 'Internal server error while fetching bookmarks.' });
   }
 }
@@ -129,15 +176,24 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
     }
 
     const trimmedUrl = rawUrl.trim();
-    const isSafe = await validateUrlAgainstSSRF(trimmedUrl);
+    // Deterministic canonicalization: strips tracking parameters, platform prefixes, trailing text
+    const canonicalUrl = canonicalizeUrl(trimmedUrl) || trimmedUrl;
+
+    const isSafe = await validateUrlAgainstSSRF(canonicalUrl);
     if (!isSafe) {
       res.status(400).json({ error: 'Security Error: Invalid or internal URL provided (SSRF Blocked).' });
       return;
     }
 
-    // Deterministic canonicalization: strips tracking parameters (?s=20, ?utm_source...&stkn=..., ?si=...)
-    const canonicalUrl = canonicalizeUrl(trimmedUrl);
-    const searchUrls = Array.from(new Set([canonicalUrl, trimmedUrl]));
+    // Build comprehensive search list to catch canonical, trimmed, and platform variations
+    const searchUrls = Array.from(new Set([
+      canonicalUrl,
+      trimmedUrl,
+      canonicalUrl.replace('https://x.com', 'https://twitter.com'),
+      canonicalUrl.replace('https://twitter.com', 'https://x.com'),
+      canonicalUrl.replace('/reel/', '/reels/'),
+      canonicalUrl.replace('/reels/', '/reel/'),
+    ])).filter(Boolean);
 
     // 1. User duplicate check: has THIS user already bookmarked this URL?
     const { data: existingUserBm } = await supabase
@@ -151,7 +207,7 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
 
     if (existingUserBm) {
       logger.info('BookmarkController', `Duplicate URL posted by user ${userId}: ${canonicalUrl}. Returning existing bookmark (0 credits used).`);
-      const finalBm = mapBookmarkRow(existingUserBm);
+      const finalBm = mapBookmarkRow(existingUserBm as BookmarkDbRow);
       res.status(200).json({
         ...finalBm,
         already_exists: true,
@@ -174,12 +230,12 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
     // 2. Global check: has ANY bookmark for this exact canonical URL already completed AI analysis?
     const existingGlobal = await findExistingCompletedBookmarkByUrl(searchUrls);
 
-    let metadataResult: any;
+    let metadataResult: { title?: string | null; description?: string | null; logo?: string | null; card_data?: Record<string, unknown> | null };
     let platform: string;
     let siteName: string;
     let snapshotUrl: string | null = null;
     let aiStatus: 'completed' | 'pending_manual' | 'no_credits' | 'failed' = 'pending_manual';
-    let aiAnalysisResult: any = null;
+    let aiAnalysisResult: AIVisualAnalysisResult | null = null;
 
     if (existingGlobal) {
       const prevBm = existingGlobal.bookmark;
@@ -206,13 +262,17 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
       // Fresh URL: Scrape metadata
       const { result, platform: extractedPlatform } = await dispatchExtraction(canonicalUrl);
       platform = extractedPlatform;
-      metadataResult = result;
+      metadataResult = result as ExtractionResult;
       siteName = deriveSiteName(canonicalUrl, result.ogSiteName);
+
+      const cardDataObj = typeof result.card_data === 'object' && result.card_data !== null
+        ? (result.card_data as Record<string, unknown>)
+        : {};
+      const mediaList = Array.isArray(cardDataObj.media) ? (cardDataObj.media as Array<{ url?: string }>) : [];
       snapshotUrl =
         result.snapshot ||
-        (result.card_data as any)?.snapshot ||
-        (result.card_data as any)?.media?.[0]?.url ||
-        null;
+        (typeof cardDataObj.snapshot === 'string' ? cardDataObj.snapshot : null) ||
+        (mediaList[0]?.url || null);
 
       // Evaluate AI Context creation
       if (!shouldRunAi) {
@@ -235,15 +295,16 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
               site_name: siteName,
               type: platform,
               card_data: result.card_data,
-              article_content: (result.card_data as any)?.article_content || null,
-              page_intent: (result.card_data as any)?.page_intent || null,
+              article_content: typeof cardDataObj.article_content === 'string' ? cardDataObj.article_content : null,
+              page_intent: typeof cardDataObj.page_intent === 'string' ? cardDataObj.page_intent : null,
             });
 
             // SUCCESS: Now and ONLY now deduct 1 credit for free tier
             await deductOneAiCredit(supabase, sub);
             aiStatus = 'completed';
-          } catch (aiErr: any) {
-            logger.warn('BookmarkController', 'Gemini AI generation failed. Preserving user credits:', aiErr?.message);
+          } catch (aiErr: unknown) {
+            const message = aiErr instanceof Error ? aiErr.message : String(aiErr);
+            logger.warn('BookmarkController', 'Gemini AI generation failed. Preserving user credits:', message);
             aiStatus = 'failed';
           }
         }
@@ -275,7 +336,7 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
     }
 
     // 4. Insert into ai_context table if AI was generated successfully
-    let savedAiContext = null;
+    let savedAiContext: AiContextDbRow | null = null;
     if (aiStatus === 'completed' && aiAnalysisResult) {
       const { data: aiRow, error: aiError } = await supabase
         .from('ai_context')
@@ -294,19 +355,20 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
       if (aiError) {
         logger.error('BookmarkController', 'Failed to insert ai_context into Supabase:', aiError.message);
       } else {
-        savedAiContext = aiRow;
+        savedAiContext = aiRow as AiContextDbRow;
       }
     }
 
     const finalResponse = mapBookmarkRow({
-      ...bookmarkRow,
+      ...(bookmarkRow as BookmarkDbRow),
       ai_context: savedAiContext,
     });
 
     res.status(201).json(finalResponse);
-  } catch (err: any) {
-    logger.error('BookmarkController', 'Error creating bookmark:', err?.message || err);
-    res.status(500).json({ error: err?.message || 'Internal server error while creating bookmark.' });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error('BookmarkController', 'Error creating bookmark:', message);
+    res.status(500).json({ error: message || 'Internal server error while creating bookmark.' });
   }
 }
 
@@ -375,8 +437,8 @@ export async function generateAiForBookmarkController(req: AuthenticatedRequest,
 
       // Zero credits deducted!
       const response = mapBookmarkRow({
-        ...updatedBm,
-        ai_context: aiContextRow,
+        ...(updatedBm as BookmarkDbRow),
+        ai_context: aiContextRow as AiContextDbRow,
       });
 
       res.status(200).json(response);
@@ -385,7 +447,7 @@ export async function generateAiForBookmarkController(req: AuthenticatedRequest,
 
     // 3. Only if NO existing analysis exists, check subscription & credit eligibility
     const sub = await getOrCreateUserSubscription(supabase, userId);
-    const { isEligible, creditsRemaining } = checkAiCreditEligibility(sub);
+    const { isEligible } = checkAiCreditEligibility(sub);
 
     if (!isEligible) {
       // Free limit reached -> Update bookmark status and return 402 Payment Required
@@ -402,8 +464,12 @@ export async function generateAiForBookmarkController(req: AuthenticatedRequest,
       return;
     }
 
-    // 3. Run Gemini AI
+    // 4. Run Gemini AI
     try {
+      const cardDataObj = typeof bookmark.card_data === 'object' && bookmark.card_data !== null
+        ? (bookmark.card_data as Record<string, unknown>)
+        : {};
+
       const aiAnalysis = await analyzeVisualContext({
         url: bookmark.url,
         title: bookmark.title || '',
@@ -412,8 +478,8 @@ export async function generateAiForBookmarkController(req: AuthenticatedRequest,
         site_name: bookmark.site_name,
         type: bookmark.type,
         card_data: bookmark.card_data,
-        article_content: (bookmark.card_data as any)?.article_content || null,
-        page_intent: (bookmark.card_data as any)?.page_intent || null,
+        article_content: typeof cardDataObj.article_content === 'string' ? cardDataObj.article_content : null,
+        page_intent: typeof cardDataObj.page_intent === 'string' ? cardDataObj.page_intent : null,
       });
 
       // SUCCESS: Deduct 1 credit now
@@ -451,13 +517,14 @@ export async function generateAiForBookmarkController(req: AuthenticatedRequest,
         .single();
 
       const response = mapBookmarkRow({
-        ...updatedBm,
-        ai_context: aiContextRow,
+        ...(updatedBm as BookmarkDbRow),
+        ai_context: aiContextRow as AiContextDbRow,
       });
 
       res.status(200).json(response);
-    } catch (aiErr: any) {
-      logger.warn('BookmarkController', 'Manual AI generation failed. Preserving credits:', aiErr?.message);
+    } catch (aiErr: unknown) {
+      const message = aiErr instanceof Error ? aiErr.message : String(aiErr);
+      logger.warn('BookmarkController', 'Manual AI generation failed. Preserving credits:', message);
       await supabase
         .from('bookmarks')
         .update({ ai_status: 'failed', updated_at: new Date().toISOString() })
@@ -465,8 +532,9 @@ export async function generateAiForBookmarkController(req: AuthenticatedRequest,
 
       res.status(500).json({ error: 'AI generation failed. Your credit was not deducted.', ai_status: 'failed' });
     }
-  } catch (err: any) {
-    logger.error('BookmarkController', 'Error in generateAiForBookmark:', err?.message || err);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error('BookmarkController', 'Error in generateAiForBookmark:', message);
     res.status(500).json({ error: 'Internal server error.' });
   }
 }
@@ -492,7 +560,9 @@ export async function deleteBookmarkController(req: AuthenticatedRequest, res: R
     }
 
     res.status(200).json({ success: true });
-  } catch (err: any) {
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error('BookmarkController', 'Error deleting bookmark:', message);
     res.status(500).json({ error: 'Internal server error while deleting bookmark.' });
   }
 }
@@ -518,7 +588,9 @@ export async function getUserPlanController(req: AuthenticatedRequest, res: Resp
       trial_ends_at: sub.trial_ends_at,
       auto_ai_context: sub.auto_ai_context,
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error('BookmarkController', 'Error fetching user plan:', message);
     res.status(500).json({ error: 'Failed to fetch user plan.' });
   }
 }
@@ -553,7 +625,9 @@ export async function updateUserSettingsController(req: AuthenticatedRequest, re
     }
 
     res.status(200).json(data);
-  } catch (err: any) {
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error('BookmarkController', 'Error updating user settings:', message);
     res.status(500).json({ error: 'Failed to update user settings.' });
   }
 }

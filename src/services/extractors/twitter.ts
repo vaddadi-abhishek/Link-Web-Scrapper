@@ -38,18 +38,20 @@ async function tryFxTwitterApi(tweetId: string, targetUrl: string): Promise<Extr
 
     const mediaList: MediaItem[] = [];
     if (Array.isArray(tweet.media?.photos)) {
-      tweet.media.photos.forEach((photo: any) => {
-        if (photo?.url) {
+      tweet.media.photos.forEach((photo: Record<string, unknown>) => {
+        if (typeof photo?.url === 'string') {
           mediaList.push({ type: 'image', url: photo.url });
         }
       });
     }
     if (Array.isArray(tweet.media?.videos)) {
-      tweet.media.videos.forEach((video: any) => {
-        if (video?.url || video?.thumbnail_url) {
+      tweet.media.videos.forEach((video: Record<string, unknown>) => {
+        const vUrl = typeof video?.url === 'string' ? video.url : '';
+        const vThumb = typeof video?.thumbnail_url === 'string' ? video.thumbnail_url : '';
+        if (vUrl || vThumb) {
           mediaList.push({
             type: 'video',
-            url: video.url || video.thumbnail_url,
+            url: vUrl || vThumb,
           });
         }
       });
@@ -116,8 +118,8 @@ async function tryVxTwitterApi(tweetId: string, targetUrl: string): Promise<Extr
 
     const mediaList: MediaItem[] = [];
     if (Array.isArray(data.media_extended)) {
-      data.media_extended.forEach((item: any) => {
-        if (item?.url) {
+      data.media_extended.forEach((item: Record<string, unknown>) => {
+        if (typeof item?.url === 'string') {
           mediaList.push({
             type: item.type === 'video' || item.type === 'gif' ? 'video' : 'image',
             url: item.url,

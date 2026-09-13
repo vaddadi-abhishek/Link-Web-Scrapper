@@ -12,7 +12,7 @@ export interface AIVisualAnalysisInput {
   snapshot?: string | null;
   site_name?: string;
   type?: string;
-  card_data?: any;
+  card_data?: Record<string, unknown> | null;
   forceRefresh?: boolean;
   article_content?: string | null;
   page_intent?: 'article' | 'tool_or_resource' | 'auth_or_portal' | 'general_website' | string | null;
@@ -285,12 +285,16 @@ export async function analyzeVisualContext(input: AIVisualAnalysisInput): Promis
 
   try {
     // 1. Determine Page Intent
+    const cardData = (input.card_data || {}) as Record<string, unknown>;
+    const cardPageIntent = typeof cardData.page_intent === 'string' ? cardData.page_intent : null;
+    const cardType = typeof cardData.type === 'string' ? cardData.type : null;
     const pageIntent =
       input.page_intent ||
-      input.card_data?.page_intent ||
-      (input.type === 'article' || input.card_data?.type === 'article' ? 'article' : 'general_website');
+      cardPageIntent ||
+      (input.type === 'article' || cardType === 'article' ? 'article' : 'general_website');
     const isArticle = pageIntent === 'article';
-    const articleContent = input.article_content || input.card_data?.article_content || null;
+    const cardArticleContent = typeof cardData.article_content === 'string' ? cardData.article_content : null;
+    const articleContent = input.article_content || cardArticleContent || null;
 
     // 2. Identify Candidate Visual Assets (Images & Video Posters)
     // CRITICAL: Avoid fetching, compressing, or sending images to AI for articles.
@@ -310,20 +314,27 @@ export async function analyzeVisualContext(input: AIVisualAnalysisInput): Promis
       }
 
       if (input.card_data) {
-        if (Array.isArray(input.card_data.media)) {
-          input.card_data.media.forEach((m: any) => {
-            if (!m) return;
-            if (m.type === 'video' || (m.url && isVideoUrl(m.url))) {
+        const cardMedia = input.card_data.media;
+        if (Array.isArray(cardMedia)) {
+          cardMedia.forEach((mItem: unknown) => {
+            if (!mItem || typeof mItem !== 'object') return;
+            const m = mItem as Record<string, unknown>;
+            const mUrl = typeof m.url === 'string' ? m.url : '';
+            const mType = typeof m.type === 'string' ? m.type : '';
+            const mPoster = typeof m.poster === 'string' ? m.poster : '';
+            const mThumbnail = typeof m.thumbnail === 'string' ? m.thumbnail : '';
+
+            if (mType === 'video' || (mUrl && isVideoUrl(mUrl))) {
               isVideo = true;
               // Capture poster / thumbnail keyframe for the video
-              if (m.poster && typeof m.poster === 'string' && !candidateImageUrls.includes(m.poster)) {
-                candidateImageUrls.push(m.poster);
+              if (mPoster && !candidateImageUrls.includes(mPoster)) {
+                candidateImageUrls.push(mPoster);
               }
-              if (m.thumbnail && typeof m.thumbnail === 'string' && !candidateImageUrls.includes(m.thumbnail)) {
-                candidateImageUrls.push(m.thumbnail);
+              if (mThumbnail && !candidateImageUrls.includes(mThumbnail)) {
+                candidateImageUrls.push(mThumbnail);
               }
-            } else if (m.url && typeof m.url === 'string' && !isVideoUrl(m.url) && !candidateImageUrls.includes(m.url)) {
-              candidateImageUrls.push(m.url);
+            } else if (mUrl && !isVideoUrl(mUrl) && !candidateImageUrls.includes(mUrl)) {
+              candidateImageUrls.push(mUrl);
             }
           });
         }
@@ -452,7 +463,7 @@ Return strictly valid JSON in this exact structure:
     contents.push({ text: promptText });
 
     let responseText: string | null = null;
-    let lastError: any = null;
+    let lastError: unknown = null;
 
     const modelTimeoutMs = parseInt(
       process.env.AI_MODEL_TIMEOUT_MS || String(DEFAULT_MODEL_TIMEOUT_MS),
@@ -490,9 +501,9 @@ Return strictly valid JSON in this exact structure:
           logger.info('AIVisualService', `Successfully received response from ${modelName}!`);
           break;
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         lastError = err;
-        const errMsg = (err?.message || String(err)).toLowerCase();
+        const errMsg = (err instanceof Error ? err.message : String(err)).toLowerCase();
         const isQuotaExceeded =
           errMsg.includes('limit: 20') ||
           errMsg.includes('generaterequestsperday') ||
@@ -504,10 +515,10 @@ Return strictly valid JSON in this exact structure:
           exhaustedModels.add(modelName);
           logger.warn(
             'AIVisualService',
-            `Circuit breaker tripped: Model "${modelName}" marked as exhausted due to quota limit: ${err?.message || err}`
+            `Circuit breaker tripped: Model "${modelName}" marked as exhausted due to quota limit: ${err instanceof Error ? err.message : String(err)}`
           );
         } else {
-          logger.warn('AIVisualService', `Model ${modelName} failed or timed out:`, err?.message || err);
+          logger.warn('AIVisualService', `Model ${modelName} failed or timed out:`, err instanceof Error ? err.message : String(err));
         }
       } finally {
         if (timeoutHandle) {
@@ -517,7 +528,10 @@ Return strictly valid JSON in this exact structure:
     }
 
     if (!responseText) {
-      throw lastError || new Error('All Gemini candidate models failed to return content.');
+      if (lastError instanceof Error) {
+        throw lastError;
+      }
+      throw new Error(lastError ? String(lastError) : 'All Gemini candidate models failed to return content.');
     }
 
     // Clean JSON response if wrapped in markdown code blocks
@@ -525,7 +539,7 @@ Return strictly valid JSON in this exact structure:
     const parsed = JSON.parse(cleanedJsonStr);
     const rawCategories = Array.isArray(parsed.ai_category) ? parsed.ai_category : [];
     const cleanCategories = rawCategories
-      .map((c: any) => String(c || '').trim().toLowerCase())
+      .map((c: unknown) => String(c || '').trim().toLowerCase())
       .filter((c: string) => c.length > 0 && c.length < 60);
 
     const fallback = buildFallbackAnalysis(input);
@@ -544,8 +558,9 @@ Return strictly valid JSON in this exact structure:
     aiCache.set(cacheKey, result);
 
     return result;
-  } catch (err: any) {
-    logger.error('AIVisualService', 'Error during Gemini visual analysis:', err?.message || err);
-    return buildFallbackAnalysis(input, `API Error: ${err?.message || 'Gemini processing failed'}`);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error('AIVisualService', 'Error during Gemini visual analysis:', message);
+    return buildFallbackAnalysis(input, `API Error: ${message || 'Gemini processing failed'}`);
   }
 }

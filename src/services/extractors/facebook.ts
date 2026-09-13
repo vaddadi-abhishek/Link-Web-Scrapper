@@ -772,13 +772,14 @@ export const facebookExtractor: PlatformExtractor<FacebookCardData> = {
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
           customEvaluator: async (page) => {
             return await page.evaluate(() => {
-              const getButtonText = (btn: any) => {
-                let p: any = btn;
+              const getButtonText = (btn: Element) => {
+                let p: Element | null = btn;
                 for (let i = 0; i < 4; i++) {
                   if (!p) break;
-                  const nextText = p.nextElementSibling?.innerText?.trim();
+                  const nextSibling = p.nextElementSibling as HTMLElement | null;
+                  const nextText = nextSibling?.innerText?.trim();
                   if (nextText) return nextText;
-                  const selfText = p.innerText?.trim();
+                  const selfText = (p as HTMLElement).innerText?.trim();
                   if (selfText) return selfText;
                   p = p.parentElement;
                 }

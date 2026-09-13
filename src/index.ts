@@ -48,10 +48,16 @@ app.use((_req: Request, res: Response) => {
 });
 
 // Centralized JSON Error Handler Middleware
-app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
-  logger.error('App', 'Unhandled server error:', err?.message || err);
-  res.status(err?.status || 500).json({
-    error: err?.message || 'Internal server error',
+app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  const message = err instanceof Error ? err.message : String(err);
+  const status =
+    typeof err === 'object' && err !== null && 'status' in err && typeof (err as { status: unknown }).status === 'number'
+      ? (err as { status: number }).status
+      : 500;
+
+  logger.error('App', 'Unhandled server error:', message);
+  res.status(status).json({
+    error: message || 'Internal server error',
   });
 });
 

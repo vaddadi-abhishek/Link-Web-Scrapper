@@ -44,8 +44,9 @@ export async function signupController(req: Request, res: Response): Promise<voi
       token: data.session?.access_token || null,
       message: data.session ? undefined : 'Please check your email to confirm registration.',
     });
-  } catch (err: any) {
-    logger.error('AuthController', 'Unexpected error in signup:', err?.message || err);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error('AuthController', 'Unexpected error in signup:', message);
     res.status(500).json({ error: 'Internal server error during sign up.' });
   }
 }
@@ -88,8 +89,9 @@ export async function loginController(req: Request, res: Response): Promise<void
       },
       token: data.session.access_token,
     });
-  } catch (err: any) {
-    logger.error('AuthController', 'Unexpected error in login:', err?.message || err);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error('AuthController', 'Unexpected error in login:', message);
     res.status(500).json({ error: 'Internal server error during login.' });
   }
 }
@@ -132,7 +134,9 @@ export async function getCurrentUserController(req: Request, res: Response): Pro
         name: displayName,
       },
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error('AuthController', 'Failed to verify session:', message);
     res.status(500).json({ error: 'Failed to verify session.' });
   }
 }

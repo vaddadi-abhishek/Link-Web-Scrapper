@@ -132,19 +132,20 @@ function parseLinkedInJsonLd(html: string): {
 
           // Extract multiple images from JSON-LD
           if (Array.isArray(json.image)) {
-            json.image.forEach((img: any) => {
+            json.image.forEach((img: unknown) => {
               if (typeof img === 'string') {
                 rawImages.push(img);
               } else if (img && typeof img === 'object') {
-                const u = img.url || img.contentUrl;
-                if (u && typeof u === 'string') rawImages.push(u);
+                const imgObj = img as Record<string, unknown>;
+                const u = imgObj.url || imgObj.contentUrl;
+                if (typeof u === 'string') rawImages.push(u);
               }
             });
           } else if (typeof json.image === 'string') {
             rawImages.push(json.image);
           } else if (json.image && typeof json.image === 'object') {
             const u = json.image.url || json.image.contentUrl;
-            if (u && typeof u === 'string') rawImages.push(u);
+            if (typeof u === 'string') rawImages.push(u);
           }
 
           if (json.thumbnailUrl && typeof json.thumbnailUrl === 'string') {
@@ -162,9 +163,11 @@ function parseLinkedInJsonLd(html: string): {
             comments = json.commentCount;
           }
           if (Array.isArray(json.interactionStatistic)) {
-            json.interactionStatistic.forEach((stat: any) => {
-              const statType = stat.interactionType || '';
-              const count = parseInt(stat.userInteractionCount || 0, 10);
+            json.interactionStatistic.forEach((statItem: unknown) => {
+              if (!statItem || typeof statItem !== 'object') return;
+              const stat = statItem as Record<string, unknown>;
+              const statType = typeof stat.interactionType === 'string' ? stat.interactionType : '';
+              const count = parseInt(String(stat.userInteractionCount || 0), 10);
               if (statType.includes('LikeAction') || statType.includes('ReactAction')) reactions = count;
               else if (statType.includes('CommentAction')) comments = count;
               else if (statType.includes('ShareAction')) reposts = count;
@@ -338,7 +341,7 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
           customEvaluator: async (page) => {
             return await page.evaluate(() => {
               const domImages: string[] = [];
-              document.querySelectorAll('img[src*="feedshare-image"], img[data-delayed-url*="feedshare-image"]').forEach((img: any) => {
+              document.querySelectorAll<HTMLImageElement>('img[src*="feedshare-image"], img[data-delayed-url*="feedshare-image"]').forEach((img) => {
                 const src = img.getAttribute('data-delayed-url') || img.src;
                 if (src) domImages.push(src);
               });

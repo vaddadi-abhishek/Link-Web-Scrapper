@@ -23,25 +23,25 @@ function formatMessage(level: LogLevel, tag: string, message: string): string {
 }
 
 export const logger = {
-  debug(tag: string, message: string, ...args: any[]): void {
+  debug(tag: string, message: string, ...args: unknown[]): void {
     if (shouldLog('debug')) {
       console.debug(formatMessage('debug', tag, message), ...args);
     }
   },
 
-  info(tag: string, message: string, ...args: any[]): void {
+  info(tag: string, message: string, ...args: unknown[]): void {
     if (shouldLog('info')) {
       console.info(formatMessage('info', tag, message), ...args);
     }
   },
 
-  warn(tag: string, message: string, ...args: any[]): void {
+  warn(tag: string, message: string, ...args: unknown[]): void {
     if (shouldLog('warn')) {
       console.warn(formatMessage('warn', tag, message), ...args);
     }
   },
 
-  error(tag: string, message: string, ...args: any[]): void {
+  error(tag: string, message: string, ...args: unknown[]): void {
     if (shouldLog('error')) {
       console.error(formatMessage('error', tag, message), ...args);
     }

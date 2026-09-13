@@ -167,7 +167,7 @@ async function tryPullPushReddit(postId: string): Promise<ExtractionResult<Reddi
 
     // Check gallery data (e.g. multi-image posts)
     if (Array.isArray(post.gallery_data?.items)) {
-      post.gallery_data.items.forEach((gItem: any) => {
+      post.gallery_data.items.forEach((gItem: { media_id?: string }) => {
         if (gItem?.media_id) {
           const galleryUrl = `https://i.redd.it/${gItem.media_id}.jpg`;
           addOrUpgradeImage(mediaList, galleryUrl);
@@ -419,7 +419,7 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
                     const parsed = JSON.parse(packagedJsonStr);
                     const permutations = parsed?.playbackMp4s?.permutations;
                     if (Array.isArray(permutations) && permutations.length > 0) {
-                      const sorted = [...permutations].sort((a: any, b: any) => {
+                      const sorted = [...permutations].sort((a: Record<string, { dimensions?: { height?: number } }>, b: Record<string, { dimensions?: { height?: number } }>) => {
                         const hA = a?.source?.dimensions?.height || 0;
                         const hB = b?.source?.dimensions?.height || 0;
                         return hB - hA;
@@ -464,16 +464,16 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
               }
 
               // 1. Zoomable images (highest resolution original)
-              const zoomables = Array.from(sp.querySelectorAll('zoomable-img img'));
-              zoomables.forEach((img: any) => {
+              const zoomables = Array.from(sp.querySelectorAll<HTMLImageElement>('zoomable-img img'));
+              zoomables.forEach((img) => {
                 if (img.src) images.push(img.src);
               });
 
               // 2. Targeted .media-lightbox-img containers (excluding background filter images)
-              const mediaLightboxContainers = Array.from(sp.querySelectorAll('div.media-lightbox-img, gallery-carousel li, [slot="post-media-container"]'));
-              mediaLightboxContainers.forEach((container: any) => {
-                const primaryImgs = Array.from(container.querySelectorAll('img#post-image, img[data-post-media-primary], img.preview-img'));
-                primaryImgs.forEach((img: any) => {
+              const mediaLightboxContainers = Array.from(sp.querySelectorAll<HTMLElement>('div.media-lightbox-img, gallery-carousel li, [slot="post-media-container"]'));
+              mediaLightboxContainers.forEach((container) => {
+                const primaryImgs = Array.from(container.querySelectorAll<HTMLImageElement>('img#post-image, img[data-post-media-primary], img.preview-img'));
+                primaryImgs.forEach((img) => {
                   if (img.src && !img.classList.contains('post-background-image-filter')) {
                     images.push(img.src);
                   }
@@ -481,8 +481,8 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
               });
 
               // 3. Carousel slides
-              const carouselImgs = Array.from(sp.querySelectorAll('gallery-carousel figure img, gallery-carousel ul li img'));
-              carouselImgs.forEach((img: any) => {
+              const carouselImgs = Array.from(sp.querySelectorAll<HTMLImageElement>('gallery-carousel figure img, gallery-carousel ul li img'));
+              carouselImgs.forEach((img) => {
                 if (img.src && !img.classList.contains('post-background-image-filter')) {
                   images.push(img.src);
                 }
@@ -490,8 +490,8 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
 
               // 4. Fallback if no images found yet
               if (images.length === 0) {
-                const fallbackImgs = Array.from(sp.querySelectorAll('shreddit-aspect-ratio img, [slot="post-media-container"] img'));
-                fallbackImgs.forEach((img: any) => {
+                const fallbackImgs = Array.from(sp.querySelectorAll<HTMLImageElement>('shreddit-aspect-ratio img, [slot="post-media-container"] img'));
+                fallbackImgs.forEach((img) => {
                   if (img.src && !img.classList.contains('post-background-image-filter')) {
                     images.push(img.src);
                   }

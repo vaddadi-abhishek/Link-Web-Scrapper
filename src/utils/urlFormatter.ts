@@ -39,6 +39,30 @@ const TRACKING_QUERY_PARAMS = new Set([
 ]);
 
 /**
+ * Pre-cleans raw user input: strips platform labels (e.g. 'x: ', 'insta: '),
+ * removes markdown brackets, and isolates the URL candidate.
+ */
+function cleanRawUrlInput(rawInput: string): string {
+  if (!rawInput || typeof rawInput !== 'string') return '';
+  let str = rawInput.trim();
+
+  // Strip markdown links like [title](https://...) or <https://...>
+  str = str.replace(/^<([^>]+)>$/, '$1');
+  const mdMatch = str.match(/\[.*?\]\((https?:\/\/[^\s)]+)\)/i);
+  if (mdMatch) {
+    str = mdMatch[1];
+  }
+
+  // Strip leading platform labels like "x: ", "insta: ", "instagram: ", etc.
+  str = str.replace(
+    /^(?:x|twitter|insta|instagram|facebook|fb|reddit|youtube|yt|github|web|link):\s*/i,
+    ''
+  );
+
+  return str.trim();
+}
+
+/**
  * Produces a deterministic canonical URL for social media and general web links.
  * Strips tracking query parameters, normalizes path aliases (e.g. Instagram /reels/ vs /reel/),
  * and unifies hostnames so identical content shares the exact same cache key.
@@ -48,13 +72,70 @@ export function canonicalizeUrl(rawUrl: string): string {
     return '';
   }
 
-  let trimmed = rawUrl.trim();
-  if (!/^https?:\/\//i.test(trimmed)) {
-    trimmed = `https://${trimmed}`;
+  const preCleaned = cleanRawUrlInput(rawUrl);
+  if (!preCleaned) return '';
+
+  // 1. Twitter / X Canonicalization
+  // Matches: x.com/user/status/123, twitter.com/user/status/123 with optional trailing text or paths
+  const tweetMatch = preCleaned.match(
+    /(?:https?:\/\/)?(?:www\.|mobile\.)?(?:twitter\.com|x\.com)\/(?:#!\/)?([a-zA-Z0-9_]+)\/status\/(\d+)/i
+  );
+  if (tweetMatch) {
+    const handle = tweetMatch[1].toLowerCase();
+    const statusId = tweetMatch[2];
+    return `https://x.com/${handle}/status/${statusId}`;
+  }
+
+  // 2. Instagram Canonicalization
+  // Matches: instagram.com/p/ID, instagram.com/reel/ID, instagram.com/reels/ID, instagram.com/tv/ID
+  const igMatch = preCleaned.match(
+    /(?:https?:\/\/)?(?:www\.)?instagram\.com\/(?:reel|reels|p|tv)\/([a-zA-Z0-9_-]+)/i
+  );
+  if (igMatch) {
+    const shortcode = igMatch[1];
+    return `https://www.instagram.com/reel/${shortcode}/`;
+  }
+
+  // 3. YouTube Canonicalization
+  // Matches: youtube.com/watch?v=ID, youtu.be/ID, youtube.com/shorts/ID
+  const ytMatch = preCleaned.match(
+    /(?:https?:\/\/)?(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?.*v=|shorts\/|embed\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/i
+  );
+  if (ytMatch) {
+    const videoId = ytMatch[1];
+    const tMatch = preCleaned.match(/[?&]t=([0-9a-zA-Z]+)/i);
+    return tMatch
+      ? `https://www.youtube.com/watch?v=${videoId}&t=${tMatch[1]}`
+      : `https://www.youtube.com/watch?v=${videoId}`;
+  }
+
+  // 4. Reddit Canonicalization
+  const redditMatch = preCleaned.match(
+    /(?:https?:\/\/)?(?:www\.|old\.)?reddit\.com\/r\/([^/\s]+)\/comments\/([a-zA-Z0-9]+)/i
+  );
+  if (redditMatch) {
+    const subreddit = redditMatch[1].toLowerCase();
+    const postId = redditMatch[2];
+    return `https://www.reddit.com/r/${subreddit}/comments/${postId}/`;
+  }
+  const redditShortMatch = preCleaned.match(/(?:https?:\/\/)?redd\.it\/([a-zA-Z0-9]+)/i);
+  if (redditShortMatch) {
+    return `https://redd.it/${redditShortMatch[1]}`;
+  }
+
+  // 5. General Web Sites
+  let formatted = preCleaned;
+  const spaceIdx = formatted.search(/\s/);
+  if (spaceIdx > 0) {
+    formatted = formatted.slice(0, spaceIdx);
+  }
+
+  if (!/^https?:\/\//i.test(formatted)) {
+    formatted = `https://${formatted}`;
   }
 
   try {
-    const urlObj = new URL(trimmed);
+    const urlObj = new URL(formatted);
     let hostname = urlObj.hostname.toLowerCase();
     let pathname = urlObj.pathname;
 
@@ -69,99 +150,14 @@ export function canonicalizeUrl(rawUrl: string): string {
     // Strip hash fragment
     urlObj.hash = '';
 
-    // 1. Instagram Canonicalization
-    if (hostname.includes('instagram.com')) {
-      urlObj.hostname = 'www.instagram.com';
-
-      // Normalize /reels/<id> to /reel/<id>
-      pathname = pathname.replace(/\/reels\//i, '/reel/');
-
-      // Posts, reels, and IGTV have distinct shortcodes that do not require query parameters
-      const igMatch = pathname.match(/\/(reel|p|tv)\/([a-zA-Z0-9_-]+)/i);
-      if (igMatch) {
-        const type = igMatch[1].toLowerCase();
-        const shortcode = igMatch[2];
-        pathname = `/${type}/${shortcode}/`;
-        urlObj.search = '';
-      } else {
-        // Strip tracking params for profiles or other IG paths
-        for (const param of Array.from(urlObj.searchParams.keys())) {
-          if (TRACKING_QUERY_PARAMS.has(param.toLowerCase())) {
-            urlObj.searchParams.delete(param);
-          }
-        }
-      }
-    }
-    // 2. Twitter / X Canonicalization
-    else if (hostname.includes('twitter.com') || hostname === 'x.com') {
-      urlObj.hostname = 'x.com';
-
-      const tweetMatch = pathname.match(/\/([a-zA-Z0-9_]+)\/status\/(\d+)/i);
-      if (tweetMatch) {
-        pathname = `/${tweetMatch[1].toLowerCase()}/status/${tweetMatch[2]}`;
-        urlObj.search = '';
-      } else {
-        for (const param of Array.from(urlObj.searchParams.keys())) {
-          if (TRACKING_QUERY_PARAMS.has(param.toLowerCase())) {
-            urlObj.searchParams.delete(param);
-          }
-        }
-        pathname = pathname.replace(/\/+$/, '');
-      }
-    }
-    // 3. YouTube Canonicalization
-    else if (hostname.includes('youtube.com') || hostname === 'youtu.be') {
-      urlObj.hostname = 'www.youtube.com';
-
-      let videoId: string | null = null;
-      if (hostname === 'youtu.be') {
-        videoId = pathname.replace(/^\//, '').split('/')[0] || null;
-      } else if (pathname.startsWith('/shorts/')) {
-        videoId = pathname.replace('/shorts/', '').split('/')[0] || null;
-      } else if (pathname === '/watch') {
-        videoId = urlObj.searchParams.get('v');
-      }
-
-      if (videoId) {
-        pathname = '/watch';
-        const t = urlObj.searchParams.get('t');
-        urlObj.search = '';
-        urlObj.searchParams.set('v', videoId);
-        if (t) urlObj.searchParams.set('t', t);
-      } else {
-        for (const param of Array.from(urlObj.searchParams.keys())) {
-          if (TRACKING_QUERY_PARAMS.has(param.toLowerCase())) {
-            urlObj.searchParams.delete(param);
-          }
-        }
-      }
-    }
-    // 4. Reddit Canonicalization
-    else if (hostname.includes('reddit.com')) {
-      urlObj.hostname = 'www.reddit.com';
-      const redditPostMatch = pathname.match(/^(\/r\/[^\/]+\/comments\/[a-zA-Z0-9]+)/i);
-      if (redditPostMatch) {
-        pathname = `${redditPostMatch[1]}/`;
-        urlObj.search = '';
-      } else {
-        for (const param of Array.from(urlObj.searchParams.keys())) {
-          if (TRACKING_QUERY_PARAMS.has(param.toLowerCase())) {
-            urlObj.searchParams.delete(param);
-          }
-        }
-      }
-    }
-    // 5. Facebook Canonicalization
-    else if (hostname.includes('facebook.com')) {
+    if (hostname.includes('facebook.com')) {
       urlObj.hostname = 'www.facebook.com';
       for (const param of Array.from(urlObj.searchParams.keys())) {
         if (TRACKING_QUERY_PARAMS.has(param.toLowerCase())) {
           urlObj.searchParams.delete(param);
         }
       }
-    }
-    // 6. General Web Sites
-    else {
+    } else {
       if (hostname.startsWith('www.')) {
         urlObj.hostname = hostname.slice(4);
       }
@@ -180,8 +176,41 @@ export function canonicalizeUrl(rawUrl: string): string {
 
     return urlObj.toString();
   } catch {
-    return trimmed;
+    return preCleaned;
   }
+}
+
+/**
+ * Checks if two URLs represent the exact same piece of content by comparing
+ * their canonical strings as well as platform entity identifiers.
+ */
+export function isSameBookmarkUrl(urlA?: string | null, urlB?: string | null): boolean {
+  if (!urlA || !urlB) return false;
+  const trimmedA = urlA.trim();
+  const trimmedB = urlB.trim();
+  if (trimmedA === trimmedB) return true;
+
+  const canonicalA = canonicalizeUrl(trimmedA);
+  const canonicalB = canonicalizeUrl(trimmedB);
+  if (canonicalA && canonicalB && canonicalA === canonicalB) return true;
+
+  const tweetIdA = trimmedA.match(/(?:twitter\.com|x\.com)\/(?:#!\/)?[a-zA-Z0-9_]+\/status\/(\d+)/i)?.[1];
+  const tweetIdB = trimmedB.match(/(?:twitter\.com|x\.com)\/(?:#!\/)?[a-zA-Z0-9_]+\/status\/(\d+)/i)?.[1];
+  if (tweetIdA && tweetIdB && tweetIdA === tweetIdB) return true;
+
+  const igCodeA = trimmedA.match(/instagram\.com\/(?:reel|reels|p|tv)\/([a-zA-Z0-9_-]+)/i)?.[1];
+  const igCodeB = trimmedB.match(/instagram\.com\/(?:reel|reels|p|tv)\/([a-zA-Z0-9_-]+)/i)?.[1];
+  if (igCodeA && igCodeB && igCodeA === igCodeB) return true;
+
+  const ytA = trimmedA.match(/(?:youtube\.com\/(?:watch\?.*v=|shorts\/|embed\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/i)?.[1];
+  const ytB = trimmedB.match(/(?:youtube\.com\/(?:watch\?.*v=|shorts\/|embed\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/i)?.[1];
+  if (ytA && ytB && ytA === ytB) return true;
+
+  const redA = trimmedA.match(/reddit\.com\/r\/[^/\s]+\/comments\/([a-zA-Z0-9]+)/i)?.[1] || trimmedA.match(/redd\.it\/([a-zA-Z0-9]+)/i)?.[1];
+  const redB = trimmedB.match(/reddit\.com\/r\/[^/\s]+\/comments\/([a-zA-Z0-9]+)/i)?.[1] || trimmedB.match(/redd\.it\/([a-zA-Z0-9]+)/i)?.[1];
+  if (redA && redB && redA === redB) return true;
+
+  return false;
 }
 
 /**

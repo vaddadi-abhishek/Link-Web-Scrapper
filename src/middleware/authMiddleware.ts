@@ -40,8 +40,9 @@ export async function authMiddleware(
     req.supabase = getAuthenticatedSupabaseClient(token);
 
     next();
-  } catch (err: any) {
-    logger.error('AuthMiddleware', 'Authentication unexpected error:', err?.message || err);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error('AuthMiddleware', 'Authentication unexpected error:', message);
     res.status(500).json({ error: 'Internal auth verification error.' });
   }
 }

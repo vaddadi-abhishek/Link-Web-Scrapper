@@ -507,8 +507,9 @@ export async function scrapeWithCheerio(targetUrl: string): Promise<CheerioExtra
       wordCount: proseWordCount,
       readingTimeMinutes,
     };
-  } catch (error: any) {
-    logger.warn('CheerioScraper', `Error scraping ${targetUrl}:`, error?.message || error);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn('CheerioScraper', `Error scraping ${targetUrl}:`, message);
     return null;
   }
 }

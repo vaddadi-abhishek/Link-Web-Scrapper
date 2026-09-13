@@ -1,8 +1,8 @@
-# mindspace Node Backend (`mindspace-node-backend`)
+# Mindspace Node Backend (`mindspace-node-backend`)
 
 A stateless, high-performance **REST API** built with **Node.js**, **Express**, **TypeScript**, **Cheerio**, **Playwright**, and **Google Gemini Multimodal Vision API** (`@google/genai`).
 
-The service extracts rich metadata, captures media snapshots, bypasses complex anti-scraping and CDN hotlinking protections, and performs deep multimodal visual/video intelligence on bookmarked links.
+The service provides automated metadata extraction, media capture, anti-scraping and CDN hotlinking bypasses, user authentication, subscription quota gating, and deep multimodal visual intelligence on bookmarked links for **Mindspace**.
 
 ---
 
@@ -10,252 +10,264 @@ The service extracts rich metadata, captures media snapshots, bypasses complex a
 
 1. [System Architecture](#system-architecture)
 2. [What Has Been Done Until Now](#what-has-been-done-until-now)
-   - [1. Dual-Engine Scraping Pipeline](#1-dual-engine-scraping-pipeline)
-   - [2. Platform-Specific Extractors](#2-platform-specific-extractors)
-   - [3. Multimodal AI Visual & Video Intelligence](#3-multimodal-ai-visual--video-intelligence)
-   - [4. High-Performance In-Memory LRU Caching](#4-high-performance-in-memory-lru-caching)
-   - [5. Global TCP Connection Pooling](#5-global-tcp-connection-pooling)
-   - [6. Reverse Image Proxy Engine](#6-reverse-image-proxy-engine)
-   - [7. Enterprise SSRF Protection & DNS Validation](#7-enterprise-ssrf-protection--dns-validation)
-3. [API Endpoints Reference](#api-endpoints-reference)
-4. [Project Structure](#project-structure)
+   - [1. Authentication, Sessions & RLS](#1-authentication-sessions--rls)
+   - [2. Dual-Engine Scraping Pipeline](#2-dual-engine-scraping-pipeline)
+   - [3. Platform-Specific Extractors](#3-platform-specific-extractors)
+   - [4. Multimodal AI Visual & Video Intelligence](#4-multimodal-ai-visual--video-intelligence)
+   - [5. Subscription Credit Quota & Rate Limits](#5-subscription-credit-quota--rate-limits)
+   - [6. High-Performance In-Memory LRU Caching](#6-high-performance-in-memory-lru-caching)
+   - [7. Global TCP Connection Pooling](#7-global-tcp-connection-pooling)
+   - [8. Streaming Reverse Image Proxy Engine](#8-streaming-reverse-image-proxy-engine)
+   - [9. Enterprise SSRF Protection & DNS Validation](#9-enterprise-ssrf-protection--dns-validation)
+3. [Mermaid Architecture & Data Flow Diagrams](#mermaid-architecture--data-flow-diagrams)
+   - [End-to-End System Topology](#end-to-end-system-topology)
+   - [Bookmark Extraction & Multimodal AI Sequence](#bookmark-extraction--multimodal-ai-sequence)
+4. [API Endpoints Reference](#api-endpoints-reference)
 5. [Database Schema & Supabase Setup (`schema.sql`)](#database-schema--supabase-setup-schemasql)
-6. [Environment Setup](#environment-setup)
-7. [Commands & Scripts](#commands--scripts)
+6. [Project Structure](#project-structure)
+7. [Environment Setup](#environment-setup)
+8. [Commands & Scripts](#commands--scripts)
 
 ---
 
 ## System Architecture
 
-```mermaid
-flowchart TD
-    Client[Client / Frontend] -->|POST /api/v1/extract| Controller[Extract Controller]
-    Controller --> SSRF[SSRF & DNS Validator]
-    SSRF --> Cache{LRU Extraction Cache}
-    Cache -->|Hit| FastReturn[Instant Response <1ms]
-    Cache -->|Miss| Dispatcher[Platform Extractor Dispatcher]
+Mindspace Backend is engineered around three core pillars: **Speed**, **Resilience**, and **Tenant Isolation**:
 
-    Dispatcher -->|x.com| Twitter[Twitter / X Extractor]
-    Dispatcher -->|instagram.com| IG[Instagram Extractor]
-    Dispatcher -->|facebook.com| FB[Facebook Extractor]
-    Dispatcher -->|linkedin.com| LI[LinkedIn Extractor]
-    Dispatcher -->|reddit.com| Reddit[Reddit Extractor]
-    Dispatcher -->|youtube.com| YT[YouTube Extractor]
-    Dispatcher -->|other| Global[Global Web Extractor]
-
-    Twitter & IG & FB & LI & Reddit & YT & Global --> Cheerio[Tier 1: Cheerio + Open APIs]
-    Cheerio -->|Fallback if needed| Playwright[Tier 2: Playwright Chromium Headless]
-
-    Client -->|POST /api/v1/ai-analyze| AI[Gemini Multimodal AI Service]
-    AI --> Gemini[Google Gemini 3.6/3.7/3.8 Flash Vision]
-
-    Client -->|GET /api/v1/proxy-image| Proxy[Image Proxy Streamer]
-    Proxy -->|Bypass 403 / CORS| RemoteCDN[External Media CDNs]
-```
+- **Fast-Path Metadata Extraction**: Lightweight static HTML ingestion via Axios & Cheerio (<150ms) before falling back to headless Chromium through Playwright (<2s).
+- **Tenant Isolation with Supabase RLS**: All user data operations are bound to the caller's JWT token via `getAuthenticatedSupabaseClient(token)`, ensuring PostgreSQL strictly enforces `auth.uid() = user_id`.
+- **Multimodal AI Vision Intelligence**: Google Gemini 3.x Flash models analyze downscaled keyframes, audio tracks, and full article prose to synthesize contextual summaries, OCR text, and AI tags.
+- **DDoS & SSRF Defenses**: Target hostnames are validated against private, loopback, and link-local IP ranges before any network connection is established.
 
 ---
 
 ## What Has Been Done Until Now
 
-### 1. Dual-Engine Scraping Pipeline
-- **Tier 1 — Ultra-Fast Cheerio Scraper (`src/services/cheerioScraper.ts`)**:
-  - Fetches static HTML in **<150ms** with custom desktop browser user-agents.
+### 1. Authentication, Sessions & RLS
+- **Supabase Auth Gateway (`src/controllers/authController.ts`, `src/middleware/authMiddleware.ts`)**:
+  - `POST /api/v1/auth/signup`: Registers new users in Supabase Auth, populates user metadata, and returns initial JWT.
+  - `POST /api/v1/auth/login`: Authenticates user credentials and returns session tokens.
+  - `GET /api/v1/auth/me`: Validates caller's Bearer token and returns active profile.
+- **Bearer Token Middleware (`src/middleware/authMiddleware.ts`)**:
+  - Validates tokens using `supabaseAdmin.auth.getUser(token)`.
+  - Injects authenticated user object and a scoped Supabase client (`req.supabase`) directly into the request context.
+
+### 2. Dual-Engine Scraping Pipeline
+- **Tier 1 — Cheerio Scraper (`src/services/cheerioScraper.ts`)**:
+  - Fetches static HTML in **<150ms** with custom desktop browser and crawler user-agents.
   - Parses OpenGraph (`og:*`), Twitter Cards (`twitter:*`), Schema.org JSON-LD, HTML5 semantic headings, meta descriptions, and touch icons.
+  - **Full Article Extraction (`extractArticleContent`)**: Intelligently locates main article bodies (`article`, `[itemprop="articleBody"]`, `.post-content`, `main`), strips noise (ads, comments, sidebars), and outputs formatted Markdown with word counts and reading time.
 - **Tier 2 — Playwright Chromium Headless Engine (`src/services/playwrightEngine.ts`)**:
   - Singleton browser instance with automatic recovery on crash or disconnect.
-  - **Aggressive Resource Blocking**: Aborts stylesheets, fonts, images, media, websockets, and tracking scripts (Google Analytics, Hotjar, GTM, Clarity) directly at the network routing layer to maximize rendering speed and minimize RAM footprint.
+  - **Aggressive Resource Blocking**: Aborts stylesheets, fonts, images, media, websockets, and tracking scripts (Google Analytics, Hotjar, GTM, Clarity) at the network routing layer to maximize rendering speed and minimize RAM footprint.
   - Custom evaluation hooks, strict hydration timeouts (`domcontentloaded`), and clean process termination handlers (`SIGINT`, `SIGTERM`).
 
-### 2. Platform-Specific Extractors
-Each platform has a dedicated extractor strategy implementing the `PlatformExtractor` interface (`src/services/extractors/`):
+### 3. Platform-Specific Extractors
+Each supported platform has a dedicated extractor strategy implementing `PlatformExtractor` (`src/services/extractors/`):
 
-- **Facebook (`facebook.ts`)**:
-  - Multi-tier strategy targeting mobile endpoints (`m.facebook.com`, `touch.facebook.com`) and crawler user-agents (`facebookexternalhit/1.1`).
-  - **Lookaside CDN Resolver**: Automatically converts restricted `lookaside.fbsbx.com/lookaside/crawler/media` URLs into direct `scontent.*.fbcdn.net` URLs that display reliably in browsers.
-  - Extracts post caption, author name, timestamp, multi-image carousel items, and parsed engagement metrics (likes, comments, shares, multilingual view strings).
-- **Instagram (`instagram.ts`)**:
-  - Parses Instagram embed HTML and structured JSON payloads.
-  - Extracts clean captions (stripping date prefixes and comment counters), direct `.mp4` video URLs, multi-image carousel sets, and author profile details.
-- **LinkedIn (`linkedin.ts`)**:
-  - Scrapes LinkedIn JSON-LD metadata and OpenGraph tags.
-  - Filters out generic avatars (`isGhostAvatar`) and company placeholder badges.
-  - Extracts post text, author name (including fallback to post URL slug formatting), media galleries, and engagement counts (reactions, comments, reposts).
-- **Twitter / X (`twitter.ts`)**:
-  - Integrates with the **FxTwitter API** (`api.fxtwitter.com`) for sub-200ms JSON data retrieval.
-  - Extracts tweet text, verified author credentials, handle, photo galleries, video playback/thumbnails, reply/repost/like/view counts.
-  - Fallback chain: FxTwitter API → Cheerio syndication/oEmbed → Playwright evaluation.
-- **Reddit (`reddit.ts`)**:
-  - Queries Reddit JSON endpoints (`.json`) with customized user-agent headers.
-  - Extracts post title, self-text preview, subreddit icon, author username, upvote and comment counters, video previews, and image galleries.
-- **YouTube (`youtube.ts`)**:
-  - Extracts video IDs from standard URLs, shortlinks (`youtu.be`), embeds, and Shorts.
-  - Fetches channel name, subscriber count, avatar, view count, like count, and high-definition video thumbnails via oEmbed and channel scrapers.
-- **Global Web (`globalWeb.ts`)**:
-  - Universal fallback for blogs and news sites.
-  - Resolves favicon via Google S2 service (`https://www.google.com/s2/favicons?domain=...&sz=128`), resolves relative URLs to absolute links, and extracts clean meta titles and descriptions.
+| Platform | File | Features Implemented |
+| :--- | :--- | :--- |
+| **Facebook** | `facebook.ts` | Mobile endpoints, crawler headers, Lookaside CDN resolver (`lookaside.fbsbx.com` -> `scontent.*.fbcdn.net`), post captions, multi-image carousel items, and parsed engagement metrics. |
+| **Instagram** | `instagram.ts` | Parses Instagram embed HTML and structured JSON payloads, extracts clean captions, direct `.mp4` video streams, multi-image carousel sets, and author profile details. |
+| **LinkedIn** | `linkedin.ts` | Scrapes LinkedIn JSON-LD metadata, filters generic ghost avatars, extracts post text, author headlines, article bodies, and reaction counts. |
+| **Twitter / X** | `twitter.ts` | Multi-tier pipeline: FxTwitter API (`api.fxtwitter.com`), VxTwitter API, oEmbed syndication, and Playwright fallback for tweet text, media galleries, and metrics. |
+| **Reddit** | `reddit.ts` | Queries Reddit JSON endpoints (`.json`), parses gallery data, video audio/playback streams, subreddit icons, author badges, and upvote metrics. |
+| **YouTube** | `youtube.ts` | Extracts video IDs from standard URLs, shortlinks (`youtu.be`), embeds, and Shorts; queries YouTubei and oEmbed APIs for channel metadata, views, likes, and thumbnails. |
+| **Global Web** | `globalWeb.ts` | Universal fallback for blogs, docs, and news sites with Google S2 favicon resolution, page intent classification, and article extraction. |
 
-### 3. Multimodal AI Visual & Video Intelligence (`src/services/aiVisualService.ts`)
+### 4. Multimodal AI Visual & Video Intelligence (`src/services/aiVisualService.ts`)
 - **Powered by Google Gemini Multimodal Vision API (`@google/genai`)**:
   - Automatically submits media attachments and contextual metadata to Google's next-generation multimodal models.
-  - **Candidate Model Priority & 500 RPD Optimization**:
-    - Prioritizes high-quota **500 Requests Per Day (RPD)** Flash Lite models before falling back to 20 RPD flagship models:
-      ```
-      gemini-3.5-flash-lite → gemini-3.1-flash-lite → gemini-3.8-flash → gemini-3.7-flash → gemini-3.6-flash → gemini-3.5-flash
-      ```
+  - **Candidate Model Chain & Circuit Breaker**:
+    ```
+    gemini-3.5-flash-lite → gemini-3.1-flash-lite → gemini-3.8-flash → gemini-3.7-flash → gemini-3.6-flash → gemini-3.5-flash
+    ```
   - **In-Memory Quota Circuit Breaker (`exhaustedModels`)**:
-    - Module-level `exhaustedModels = new Set<string>()` tracks rate-limited models across requests.
-    - If a model encounters a quota exhaustion error (`limit: 20`, `GenerateRequestsPerDay`, `RESOURCE_EXHAUSTED`, `quota exceeded`, `429`), it is added to `exhaustedModels` and instantly bypassed in future requests without wasting network roundtrips.
-  - **Per-Model Fast Timeout (`AI_MODEL_TIMEOUT_MS`)**: Wraps each generation in a configurable timeout promise (default: `7000ms` / 7s). If a model stalls or is throttled, the request aborts after 7s and instantly falls over to the next candidate model in the chain.
-- **"All-in-One" Social Media Multimodal Pipeline**:
-  - **Platform Detection (`detectSocialPlatform`)**: Automatically identifies posts from Twitter / X, Instagram, LinkedIn, and Reddit.
-  - **Audio & Video Poster Keyframe Co-Analysis**:
-    - Downloads available post audio (`card_data.audio` or audio streams from `card_data.media`) alongside Sharp-compressed keyframe images.
-    - Sends both audio and visual inputs as `inlineData` parts in a single unified Gemini request.
-    - Instructs Gemini to transcribe spoken dialogue and voiceovers, correlate them with visual context, and synthesize the unified insights into `ai_context` and auto-generated tags.
+    - If a model encounters quota exhaustion (`limit: 20`, `GenerateRequestsPerDay`, `RESOURCE_EXHAUSTED`, `quota exceeded`, `429`), it is added to `exhaustedModels` and instantly bypassed in future requests.
+  - **Per-Model Fast Timeout (`AI_MODEL_TIMEOUT_MS`)**: Configurable timeout (default: `7000ms`). Stalled models abort and trigger immediate failover to the next candidate.
 - **Ultra-Efficient In-Memory Image Compression (`sharp`)**:
-  - **Single-Tile Optimization (Max 768px)**: Gemini parses visual inputs in 768×768 pixel tiles (~258 tokens per tile). Raw smartphone/camera photos (e.g., 4000×3000px) get split into 12–16 tiles, consuming 3,000+ tokens and megabytes of bandwidth.
-  - Using `sharp`, every candidate image is downscaled to fit within a 768×768 bounding box and converted to progressive JPEG (quality 70%).
-  - **Drastic Payload Reduction**: Decreases base64 payloads from multi-MBs down to **20KB–50KB** (a **78% to 98% reduction**) while retaining crisp clarity for entity recognition, logo detection, and OCR.
-  - Guaranteed token cap: Exactly 1 tile (~258 tokens) per image, capped at top 2 images max (~516 tokens total).
-- **Lightweight Video & Reel Processing (Keyframe + Transcript)**:
-  - Eliminates slow, quota-heavy downloads and uploads of raw 15MB `.mp4` video blobs (which previously consumed 8,000–12,000+ tokens and 10–20 seconds per video).
-  - Instead, the engine identifies video posts and extracts the **video poster thumbnail keyframe** (compressed via Sharp) and pairs it with the post's **rich caption, description, and transcript text**.
-  - Provides Gemini with full visual and contextual understanding in under **1.5 seconds** at a fraction of the cost (~258 tokens).
+  - **Single-Tile Optimization (Max 768px)**: Resizes candidate images to fit within 768×768 (Gemini's native single tile size) and converts to progressive JPEG (quality 70%).
+  - **Drastic Payload Reduction**: Decreases base64 payloads from multi-MBs down to **20KB–50KB** (a **78% to 98% reduction**) while retaining crisp clarity for entity recognition and OCR.
+- **Lightweight Video & Reel Processing (Keyframe + Text)**:
+  - Extracts poster keyframes and pairs them with post captions and transcripts in under **1.5 seconds** at ~258 tokens instead of downloading heavy 15MB video files.
 - **Anti-Hallucination Guardrails**:
-  - Specifically designed to prevent hallucinating fictional TV shows, actors, or events when links lead to login walls (e.g. private Instagram/Facebook posts).
-  - Skips AI generation on detected login walls, returning clean fallback tags instead of consuming token quotas.
-- **Output Schema**:
-  - Generates a synthesized 2–4 sentence contextual summary (`ai_context`), an array of lowercase tags (`ai_tags`), extracted visual entities (`visual_entities`), and on-screen OCR text (`ocr_text`).
-- **Heuristic Fallback**:
-  - Operates non-blockingly; if `GEMINI_API_KEY` is not configured or all models fail, the service seamlessly falls back to keyword-based heuristic tagging without throwing errors.
+  - Bypasses Gemini when login walls are detected (e.g. private Instagram/Facebook posts), returning clean fallback tags instead of consuming token quotas.
 
-### 4. High-Performance In-Memory LRU Caching & Canonical URL Normalization (`src/utils/cache.ts`, `src/utils/urlFormatter.ts`)
-- **Canonical URL Normalization (`src/utils/urlFormatter.ts`)**:
-  - Deterministically canonicalizes URLs before caching or fetching to guarantee instant cache hits across link variations:
-    - **Instagram**: Unifies `/reels/<id>` and `/reel/<id>`, strips noisy share tokens and tracking parameters (`?utm_source=...`, `&stkn=...`, `&igsh=...`, `&igshid=...`). Both direct browser URL bar copies and "Share -> Copy link" URLs resolve to the exact same canonical key: `https://www.instagram.com/reel/<id>/`.
-    - **Twitter / X**: Unifies `twitter.com`, `mobile.twitter.com`, and `x.com` to `https://x.com/<user>/status/<id>` and strips tracking params (`?s=20`, `&t=...`, `&ref_src=...`).
-    - **YouTube**: Unifies `youtu.be/<id>`, `youtube.com/shorts/<id>`, and `youtube.com/watch?v=<id>` while stripping `si`, `feature`, and `pp` tracking params.
-    - **Reddit / Facebook / Web**: Normalizes subreddits/posts, strips `fbclid`, `gclid`, `mibextid`, `ref`, and all standard `utm_*` marketing tags.
-- **Controller-Level Full Response Caching**:
-  - Caches the complete extracted response (including `card_data`, `ai_context`, `ai_tags`, `visual_entities`, and `ocr_text`) under the canonical URL key.
-  - Subsequent requests for the same post—regardless of whether copied from the browser URL bar or generated via a mobile share link—hit the cache and return in **<1ms** without touching scrapers or consuming Gemini tokens.
-- **Zero-Dependency LRU Cache Instances (`src/utils/cache.ts`)**:
-  - **`extractionCache`**: 30-minute TTL (1,000 entries) for sub-millisecond responses on repeated URL extractions.
-  - **`aiCache`**: 1-hour TTL (500 entries) for multimodal Gemini analyses keyed deterministically by canonical URL and title.
-  - **`avatarCache`**: 2-hour TTL (500 entries) for external author and channel avatars.
-  - **`dnsCache`**: 5-minute TTL (500 entries) for validated SSRF IP resolutions.
+### 5. Subscription Credit Quota & Rate Limits (`src/services/subscriptionService.ts`)
+- **Tier Quota Management**:
+  - `free`: 6 AI credits per period with automatic weekly reset.
+  - `pro`: Unlimited AI context generation.
+- **Atomic Credit Deduction**:
+  - `deductOneAiCredit()` is executed **only after** Gemini successfully generates a response, guaranteeing users are never billed for failed attempts or cached responses.
+- **Canonical URL AI Deduplication**:
+  - If any bookmark for the same canonical URL has already completed AI analysis across the database, the intelligence is reused with **0 Gemini calls and 0 credits deducted**.
 
-### 5. Global TCP Connection Pooling (`src/utils/httpClient.ts`)
+### 6. High-Performance In-Memory LRU Caching (`src/utils/cache.ts`, `src/utils/urlFormatter.ts`)
+- **Deterministic Canonicalization**:
+  - Normalizes tracking query parameters (`utm_*`, `stkn`, `igsh`, `fbclid`, `gclid`, `s=20`, `si`), path variations (`/reels/` vs `/reel/`), and hostnames.
+- **Zero-Dependency LRU Cache Instances**:
+  - `extractionCache`: 30-minute TTL (1,000 entries) for sub-millisecond repeated URL extractions.
+  - `aiCache`: 1-hour TTL (500 entries) for multimodal Gemini analyses.
+  - `avatarCache`: 2-hour TTL (500 entries) for external author/channel avatars.
+  - `dnsCache`: 5-minute TTL (500 entries) for validated SSRF IP resolutions.
+
+### 7. Global TCP Connection Pooling (`src/utils/httpClient.ts`)
 - Configured shared `http.Agent` and `https.Agent` with `keepAlive: true`, 64 max sockets, and 32 free sockets globally bound to Axios.
 - Reuses established TCP/TLS connections across consecutive requests, eliminating **50–150ms** of SSL handshake latency per scrape.
 
-### 6. Reverse Image Proxy Engine (`src/controllers/proxyController.ts` & `/api/v1/proxy-image`)
-- Proxies media requests using a crawler user-agent (`facebookexternalhit/1.1`) to bypass CDN hotlinking blocks and CORS restrictions (especially Meta CDN `fbcdn.net` / `scontent` 403 Forbidden errors).
-- **Streaming Pipeline**: Pipes upstream image chunks directly into the client response without loading full files into server memory.
-- **Caching Headers**: Injects `Cache-Control: public, max-age=86400, stale-while-revalidate=604800` to allow browser and CDN caching.
-- **Client Disconnect Handling**: Destroys upstream streams immediately if the client aborts or unmounts the component.
+### 8. Streaming Reverse Image Proxy Engine (`src/controllers/proxyController.ts` & `/api/v1/proxy-image`)
+- Proxies media requests using a crawler user-agent (`facebookexternalhit/1.1`) to bypass CDN hotlinking blocks and CORS restrictions (e.g. Meta CDN `fbcdn.net` / `scontent` 403 Forbidden errors).
+- **Streaming Pipeline**: Pipes upstream image chunks directly into the client response without buffering full files into server memory.
+- **Aggressive Caching**: Injects `Cache-Control: public, max-age=86400, stale-while-revalidate=604800` (24-hour browser cache, 7-day CDN stale-while-revalidate).
+- **Client Disconnect Handling**: Destroys upstream streams immediately if the client disconnects.
 
-### 7. Enterprise SSRF Protection & DNS Validation (`src/utils/ssrfValidator.ts`)
-- Strict defense against Server-Side Request Forgery (SSRF):
-  - Resolves target hostnames before sending requests.
-  - Blocks all internal, loopback, private, and link-local ranges:
-    - `127.0.0.0/8` (Loopback)
-    - `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` (Private RFC 1918)
-    - `169.254.0.0/16` (Link-Local & Cloud Metadata e.g. AWS/GCP `169.254.169.254`)
-    - `0.0.0.0/8` (Current network)
-    - `::1`, `fc00::/7`, `fe80::/10` (IPv6 loopback & private)
-  - Rejects `localhost`, `.local`, and `.internal` hostnames.
-  - Validated hostnames are cached in `dnsCache` to eliminate DNS threadpool bottlenecks.
+### 9. Enterprise SSRF Protection & DNS Validation (`src/utils/ssrfValidator.ts`)
+- Resolves target hostnames before sending requests.
+- Blocks internal, loopback, private, and link-local ranges:
+  - `127.0.0.0/8` (Loopback)
+  - `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` (Private RFC 1918)
+  - `169.254.0.0/16` (Link-Local & Cloud Metadata e.g. AWS/GCP `169.254.169.254`)
+  - `0.0.0.0/8` (Current network)
+  - `::1`, `fc00::/7`, `fe80::/10` (IPv6 loopback & private)
+- Rejects `localhost`, `.local`, and `.internal` hostnames.
+
+---
+
+## Mermaid Architecture & Data Flow Diagrams
+
+### End-to-End System Topology
+
+```mermaid
+graph TB
+    subgraph Client ["Frontend Layer (mindspace-frontend)"]
+        Browser[User Browser / React 19 UI]
+        TokenStorage[(localStorage: JWT Token)]
+    end
+
+    subgraph Gateway ["API Service Layer (mindspace-node-backend)"]
+        Server[Express Server :3000]
+        AuthMW[Auth Middleware / Bearer Verification]
+        Router[API Routes: /bookmarks, /extract, /proxy, /auth]
+        SSRF[SSRF & DNS Validator]
+        LRUCache{In-Memory LRU Caches}
+        Proxy[Streaming Reverse Image Proxy]
+    end
+
+    subgraph Scraping ["Scraper & AI Engines"]
+        Cheerio[Tier 1: Cheerio HTML + JSON-LD]
+        Playwright[Tier 2: Playwright Chromium Headless]
+        Sharp[Sharp 768px Image Downscaler]
+        Gemini[Google Gemini 3.x Flash Vision]
+    end
+
+    subgraph SupabaseDB ["Persistence Layer (Supabase PostgreSQL)"]
+        AuthDB[Supabase Auth Engine]
+        RLS[Row Level Security Engine]
+        T_Users[(public.users)]
+        T_Subs[(public.user_subscriptions)]
+        T_Bookmarks[(public.bookmarks)]
+        T_AI[(public.ai_context)]
+    end
+
+    Browser -- Bearer JWT --> Server
+    Server --> AuthMW
+    AuthMW -- Validate Token --> AuthDB
+    AuthMW --> Router
+    Router --> SSRF
+    SSRF --> LRUCache
+    LRUCache -- Miss --> Cheerio
+    Cheerio -. Fallback .-> Playwright
+    Router --> Sharp
+    Sharp --> Gemini
+    Router -- Scoped Client --> RLS
+    RLS --> T_Users
+    RLS --> T_Subs
+    RLS --> T_Bookmarks
+    RLS -- 1:1 Cascade --> T_AI
+    Browser -. Blocked Images .-> Proxy
+```
+
+### Bookmark Extraction & Multimodal AI Sequence
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant Frontend as mindspace Frontend
+    participant Server as Node Backend Express API
+    participant Scraper as Scraper (Cheerio / Playwright)
+    participant Gemini as Gemini 3.x Flash
+    participant Supabase as Supabase Database
+
+    User->>Frontend: Submit URL
+    Frontend->>Server: POST /api/v1/bookmarks { url }
+    Server->>Server: Validate SSRF & Canonicalize URL
+    
+    alt Duplicate Canonical URL Exists in Database
+        Server->>Supabase: Query bookmarks & ai_context
+        Server-->>Frontend: Return existing record (0 credits deducted)
+    else New URL
+        Server->>Scraper: Dispatch platform extraction
+        Scraper-->>Server: Extracted metadata, media, card_data
+        Server->>Supabase: Check user_subscriptions credits
+        
+        alt AI Enabled & Credits Available
+            Server->>Server: Downscale keyframe with Sharp (768px)
+            Server->>Gemini: Multimodal analysis (keyframe + text)
+            Gemini-->>Server: Return ai_context, ai_tags, entities, OCR
+            Server->>Supabase: Deduct 1 credit from user_subscriptions
+            Server->>Supabase: INSERT INTO bookmarks & ai_context
+        else No Credits Left
+            Server->>Supabase: INSERT INTO bookmarks (ai_status: 'no_credits')
+        end
+        
+        Server-->>Frontend: 201 Created with full bookmark record
+    end
+```
 
 ---
 
 ## API Endpoints Reference
 
-### 1. Extract URL Metadata
-**`POST /api/v1/extract`**
+### Authentication Endpoints
 
-Extracts metadata, media, platform card data, and basic tags for a given URL.
+- **`POST /api/v1/auth/signup`**: Registers user in Supabase Auth.
+  - Body: `{ "email": "user@example.com", "password": "securepassword", "username": "abhi" }`
+- **`POST /api/v1/auth/login`**: Authenticates user credentials.
+  - Body: `{ "email": "user@example.com", "password": "securepassword" }`
+- **`GET /api/v1/auth/me`**: Returns profile of authenticated caller.
+  - Headers: `Authorization: Bearer <token>`
 
-- **Request Body**:
-  ```json
-  {
-    "url": "https://x.com/username/status/1234567890",
-    "forceRefresh": false
-  }
-  ```
-- **Response (`200 OK`)**:
-  ```json
-  {
-    "type": "x",
-    "url": "https://x.com/username/status/1234567890",
-    "title": "Author Name (@handle) on X",
-    "description": "Tweet text...",
-    "logo": "https://abs.twimg.com/favicons/twitter.3.ico",
-    "site_name": "Twitter / X",
-    "card_data": {
-      "author": {
-        "name": "Author Name",
-        "handle": "@handle",
-        "avatar_url": "https://pbs.twimg.com/profile_images/...",
-        "verified": true
-      },
-      "metrics": {
-        "replies": 12,
-        "reposts": 45,
-        "likes": 230,
-        "views": 1500
-      },
-      "media": [
-        { "type": "image", "url": "https://pbs.twimg.com/media/..." }
-      ],
-      "posted_at": "2026-09-08T10:00:00.000Z"
-    },
-    "ai_context": null,
-    "ai_tags": [],
-    "cached": true
-  }
-  ```
+### Bookmark Endpoints (Authenticated)
 
-### 2. Standalone Multimodal AI Analysis
-**`POST /api/v1/ai-analyze`**
+- **`GET /api/v1/bookmarks`**: Lists all bookmarks for the authenticated user, joined with AI context.
+- **`POST /api/v1/bookmarks`**: Creates a bookmark, scrapes metadata, checks user credits, runs Gemini AI, and persists directly into Supabase.
+  - Body: `{ "url": "https://...", "auto_ai_context": true }`
+- **`POST /api/v1/bookmarks/:id/generate-ai`**: Triggers manual AI context generation for an existing bookmark. Deducts 1 credit on success.
+- **`DELETE /api/v1/bookmarks/:id`**: Removes bookmark and cascades deletion to `ai_context`.
 
-Runs deep multimodal Gemini vision analysis on an existing bookmark or media asset.
+### User & Quota Endpoints (Authenticated)
 
-- **Request Body**:
-  ```json
-  {
-    "url": "https://example.com/post",
-    "title": "Post Title",
-    "description": "Post Description",
-    "snapshot": "https://example.com/image.jpg",
-    "site_name": "Platform"
-  }
-  ```
-- **Response (`200 OK`)**:
-  ```json
-  {
-    "ai_context": "Detailed contextual paragraph synthesizing video/image elements, actors, and spoken topics...",
-    "ai_tags": ["technology", "ai", "web-development"],
-    "visual_entities": ["Visual Entity 1", "Logo Name"],
-    "ocr_text": "Text detected inside media..."
-  }
-  ```
+- **`GET /api/v1/user/plan`**: Returns current plan tier (`free` / `pro`), remaining AI credits, and reset timestamp.
+- **`PATCH /api/v1/user/settings`**: Updates preferences (e.g. `{ "auto_ai_context": false }`).
 
-### 3. Streaming Image Proxy
-**`GET /api/v1/proxy-image?url=ENCODED_IMAGE_URL`**
+### Utility Endpoints
 
-Bypasses hotlinking blocks and returns the image stream with SSRF protection and 24-hour client caching.
+- **`POST /api/v1/extract`**: Stateless metadata extraction with optional AI analysis.
+- **`POST /api/v1/ai-analyze`**: Standalone multimodal visual intelligence analysis.
+- **`GET /api/v1/proxy-image?url=ENCODED_IMAGE_URL`**: High-performance reverse image proxy bypassing hotlink blocks.
+- **`GET /health`**: Health status and ISO timestamp.
 
-### 4. Health Check
-**`GET /health`**
+---
 
-Returns service uptime status:
-```json
-{
-  "status": "ok",
-  "timestamp": "2026-09-08T16:47:00.000Z"
-}
-```
+## Database Schema & Supabase Setup (`schema.sql`)
+
+The repository includes a complete PostgreSQL schema script in [`schema.sql`](file:///c:/Users/abhi/Documents/mindspace/mindspace-node-backend/schema.sql) ready to be executed in the **Supabase SQL Editor**:
+
+1. Open your project on the [Supabase Dashboard](https://supabase.com/dashboard).
+2. Navigate to the **SQL Editor** tab on the left sidebar.
+3. Copy the entire contents of [`mindspace-node-backend/schema.sql`](file:///c:/Users/abhi/Documents/mindspace/mindspace-node-backend/schema.sql).
+4. Paste it into the editor and click **Run**.
 
 ---
 
@@ -266,9 +278,15 @@ mindspace-node-backend/
 ├── src/
 │   ├── controllers/
 │   │   ├── aiController.ts         # Controller for /api/v1/ai-analyze
+│   │   ├── authController.ts       # Controller for /api/v1/auth (signup, login, me)
+│   │   ├── bookmarkController.ts   # Controller for /api/v1/bookmarks & user plan
 │   │   ├── extractController.ts    # Controller for /api/v1/extract
 │   │   └── proxyController.ts      # Controller for /api/v1/proxy-image
+│   ├── middleware/
+│   │   └── authMiddleware.ts       # Bearer token validator & RLS client injector
 │   ├── routes/
+│   │   ├── auth.ts                 # Authentication routes
+│   │   ├── bookmarks.ts            # Bookmark CRUD and user plan routes
 │   │   ├── extract.ts              # Extraction & AI routes
 │   │   └── proxy.ts                # Image proxy route
 │   ├── services/
@@ -283,18 +301,21 @@ mindspace-node-backend/
 │   │   │   ├── types.ts            # Common extractor TypeScript interfaces
 │   │   │   └── youtube.ts          # YouTube oEmbed & channel extractor
 │   │   ├── aiVisualService.ts      # Multimodal Gemini vision & fallback service
-│   │   ├── cheerioScraper.ts       # Fast static HTML scraper
-│   │   └── playwrightEngine.ts     # Chromium headless browser manager
+│   │   ├── cheerioScraper.ts       # Fast static HTML & Markdown article scraper
+│   │   ├── playwrightEngine.ts     # Chromium headless browser manager
+│   │   └── subscriptionService.ts  # Tier credit allocation & quota deduction
 │   ├── utils/
 │   │   ├── cache.ts                # In-memory LRU cache implementations
 │   │   ├── httpClient.ts           # Axios TCP keep-alive connection pooling
-│   │   ├── logger.ts               # Timestamped structured logger
-│   │   ├── numberParser.ts         # Formatted numbers parser (e.g. 1.2K -> 1200)
+│   │   ├── logger.ts               # Structured timestamped logger
+│   │   ├── numberParser.ts         # Formatted number parser (e.g. 1.2K -> 1200)
 │   │   ├── siteName.ts             # Domain & site name resolver
 │   │   ├── ssrfValidator.ts        # SSRF IP resolution defense
+│   │   ├── supabaseClient.ts       # Supabase admin and RLS client factories
 │   │   ├── textCleaner.ts          # HTML entity & whitespace cleaner
-│   │   └── urlFormatter.ts         # Absolute URL resolver & normalizer
+│   │   └── urlFormatter.ts         # Absolute URL resolver & canonicalizer
 │   └── index.ts                    # Express app initialization & shutdown hooks
+├── schema.sql                      # PostgreSQL database schema & RLS policies
 ├── package.json
 ├── tsconfig.json
 └── .env.example
@@ -302,47 +323,26 @@ mindspace-node-backend/
 
 ---
 
-## Database Schema & Supabase Setup (`schema.sql`)
-
-The repository includes a complete PostgreSQL schema script in [`schema.sql`](file:///c:/Users/abhi/Documents/mindspace-app/mindspace-node-backend/schema.sql) ready to be executed in the **Supabase SQL Editor**:
-
-### 1. Key Database Changes & Architecture
-- **Wiped Off Obsolete Tables**:
-  - Legacy `collections`, `tags`, `bookmark_collections`, and `bookmark_tags` tables have been completely dropped.
-  - Manual folder and tag creation is eliminated in favor of 100% automated Multimodal AI visual analysis, summary synthesis, and auto-tagging.
-- **Dedicated `public.ai_context` Table**:
-  - Instead of overloading `public.bookmarks`, AI visual context, auto-generated tags (`ai_tags`), visual entities, and OCR text are stored in a separate table.
-  - Keyed by `bookmark_id UUID NOT NULL UNIQUE REFERENCES public.bookmarks(id) ON DELETE CASCADE`.
-- **Core Entities**:
-  - `public.users`: Synchronized from `auth.users` on sign-up via PostgreSQL trigger.
-  - `public.bookmarks`: Core link metadata, snapshots, favicons, site names, and platform-specific `card_data`.
-  - `public.ai_context`: Multimodal AI visual descriptions, OCR text, and auto-generated tags.
-- **Security & RLS**:
-  - Strict Row Level Security (RLS) policies enabled across all tables guaranteeing complete data isolation per `auth.uid() = user_id`.
-
-### 2. How to Apply
-1. Open your project on the [Supabase Dashboard](https://supabase.com/dashboard).
-2. Navigate to the **SQL Editor** tab on the left sidebar.
-3. Copy the entire contents of [`mindspace-node-backend/schema.sql`](file:///c:/Users/abhi/Documents/mindspace-app/mindspace-node-backend/schema.sql).
-4. Paste it into the editor and click **Run**.
-
-
 ## Environment Setup
 
-Create a `.env` file in `mindspace-node-backend/` based on `.env.example`:
+Create a `.env` file in `mindspace-node-backend/`:
 
 ```env
 PORT=3000
-GEMINI_API_KEY=AIzaSy...
+
+# Google Gemini Multimodal Vision API Key
+GEMINI_API_KEY=your_gemini_api_key_here
 ENABLE_AI_VISUAL=true
 AI_MODEL_TIMEOUT_MS=7000
-```
 
-### Obtaining a Google Gemini API Key
-1. Visit [Google AI Studio](https://aistudio.google.com).
-2. Sign in with your Google account.
-3. Click **"Get API Key"** and generate a new key (free tier available).
-4. Paste the key into your `.env` file as `GEMINI_API_KEY`.
+# Supabase Configuration
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key-here
+SUPABASE_ANON_KEY=your-anon-key-here
+
+# Logging
+LOG_LEVEL=info
+```
 
 ---
 
@@ -350,7 +350,7 @@ AI_MODEL_TIMEOUT_MS=7000
 
 ### Prerequisites
 - Node.js (v18+)
-- Playwright Chromium browser installed (`npx playwright install chromium`)
+- Playwright Chromium browser (`npx playwright install chromium`)
 
 ### Installation
 ```bash
@@ -358,20 +358,17 @@ npm install
 npx playwright install chromium
 ```
 
-### Development Mode (with Hot Reload)
+### Development Server (with Hot Reload)
 ```bash
 npm run dev
 ```
-Starts the API server on `http://localhost:3000` via `ts-node-dev`.
 
 ### Compile TypeScript
 ```bash
 npm run build
 ```
-Compiles TypeScript into `dist/`.
 
 ### Run Production Server
 ```bash
 npm start
 ```
-Runs the compiled `dist/index.js` file.
