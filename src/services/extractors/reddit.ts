@@ -181,11 +181,15 @@ async function tryPullPushReddit(postId: string): Promise<ExtractionResult<Reddi
       addOrUpgradeImage(mediaList, previewUrl);
     }
 
-    const snapshot =
-      mediaList[0]?.url ||
-      (post.thumbnail && post.thumbnail.startsWith('http') && !post.thumbnail.includes('default') && !post.thumbnail.includes('nsfw')
-        ? post.thumbnail
-        : null);
+    if (
+      mediaList.length === 0 &&
+      post.thumbnail &&
+      post.thumbnail.startsWith('http') &&
+      !post.thumbnail.includes('default') &&
+      !post.thumbnail.includes('nsfw')
+    ) {
+      addOrUpgradeImage(mediaList, post.thumbnail);
+    }
 
     const iconUrl = getSubredditIcon(subredditName, post.sr_detail?.community_icon || post.sr_detail?.icon_img);
 
@@ -355,7 +359,9 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
             }
           });
         }
-        if (pullPushResult.snapshot && !snapshot) snapshot = pullPushResult.snapshot;
+        if (!snapshot && mediaList.length > 0) {
+          snapshot = mediaList[0].url;
+        }
         if (pullPushResult.card_data.subreddit.icon_url && !pullPushResult.card_data.subreddit.icon_url.includes('ui-avatars')) {
           subredditIcon = pullPushResult.card_data.subreddit.icon_url;
         }

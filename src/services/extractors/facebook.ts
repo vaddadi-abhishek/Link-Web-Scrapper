@@ -920,7 +920,6 @@ export const facebookExtractor: PlatformExtractor<FacebookCardData> = {
     return {
       title: null, // Title is null for Facebook (no post titles, only author & description)
       description: finalDescription,
-      snapshot,
       logo: FACEBOOK_LOGO_URL,
       ogSiteName: 'Facebook',
       card_data: {

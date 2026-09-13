@@ -423,7 +423,6 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
     return {
       title: isArticle ? (articleTitle ? cleanTitle(articleTitle) : null) : null,
       description: finalDescription,
-      snapshot: primarySnapshot,
       logo: LINKEDIN_LOGO_URL,
       ogSiteName: isArticle ? 'LinkedIn Article' : 'LinkedIn',
       card_data: {

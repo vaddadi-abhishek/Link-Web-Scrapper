@@ -43,7 +43,6 @@ export interface BookmarkResponse {
   url: string;
   title: string;
   description: string;
-  snapshot: string | null;
   logo: string | null;
   site_name: string;
   type: string;
@@ -75,17 +74,21 @@ function mapBookmarkRow(row: BookmarkDbRow): BookmarkResponse {
   );
   const resolvedStatus = hasAiContext ? 'completed' : (row.ai_status || 'pending_manual');
 
+  const cardData = row.card_data ? { ...row.card_data } : undefined;
+  if (cardData && !cardData.snapshot && row.snapshot_url && (row.type === 'generic' || !row.type)) {
+    cardData.snapshot = row.snapshot_url;
+  }
+
   return {
     id: row.id,
     user_id: row.user_id,
     url: row.url,
     title: row.title || row.url,
     description: row.description || '',
-    snapshot: row.snapshot_url || null,
     logo: row.logo_url || null,
     site_name: row.site_name || '',
     type: row.type || 'generic',
-    card_data: row.card_data || undefined,
+    card_data: cardData,
     ai_status: resolvedStatus,
     created_at: row.created_at,
     ai_context: aiCtx?.context || null,
@@ -270,7 +273,6 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
         : {};
       const mediaList = Array.isArray(cardDataObj.media) ? (cardDataObj.media as Array<{ url?: string }>) : [];
       snapshotUrl =
-        result.snapshot ||
         (typeof cardDataObj.snapshot === 'string' ? cardDataObj.snapshot : null) ||
         (mediaList[0]?.url || null);
 

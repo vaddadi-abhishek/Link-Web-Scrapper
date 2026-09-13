@@ -96,6 +96,25 @@ export interface YouTubeCardData {
   posted_at: string | null;
 }
 
+export interface PinterestCardData {
+  author?: {
+    name?: string;
+    username?: string;
+    avatar_url?: string | null;
+  };
+  board?: {
+    name?: string;
+    url?: string;
+  };
+  metrics?: {
+    saves?: number;
+    comments?: number;
+    repins?: number;
+  };
+  media?: MediaItem[];
+  posted_at?: string | null;
+}
+
 export interface GlobalWebCardData {
   author: string | null;
   published_at: string | null;
@@ -111,7 +130,6 @@ export interface GlobalWebCardData {
 export interface ExtractionResult<T = any> {
   title: string | null;
   description: string | null;
-  snapshot?: string | null;
   logo: string | null;
   ogSiteName: string | null;
   card_data: T;

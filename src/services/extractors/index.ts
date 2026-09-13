@@ -5,6 +5,7 @@ import { instagramExtractor } from './instagram';
 import { facebookExtractor } from './facebook';
 import { linkedInExtractor } from './linkedin';
 import { youtubeExtractor } from './youtube';
+import { pinterestExtractor } from './pinterest';
 import { globalWebExtractor } from './globalWeb';
 import { extractionCache } from '../../utils/cache';
 import { canonicalizeUrl } from '../../utils/urlFormatter';
@@ -20,6 +21,7 @@ const PLATFORM_EXTRACTORS: Array<{ pattern: RegExp; extractor: PlatformExtractor
   { pattern: /(?:^|\.)(?:reddit\.com|redd\.it)$/i, extractor: redditExtractor },
   { pattern: /(?:^|\.)(?:x\.com|twitter\.com|t\.co)$/i, extractor: twitterExtractor },
   { pattern: /(?:^|\.)(?:instagram\.com|instagr\.am)$/i, extractor: instagramExtractor },
+  { pattern: /(?:^|\.)(?:pinterest\.[a-z.]+|pin\.it)$/i, extractor: pinterestExtractor },
   { pattern: /(?:^|\.)(?:facebook\.com|fb\.com|fb\.watch|fb\.me)$/i, extractor: facebookExtractor },
   { pattern: /(?:^|\.)(?:linkedin\.com|lnkd\.in)$/i, extractor: linkedInExtractor },
   { pattern: /(?:^|\.)(?:youtube\.com|youtu\.be)$/i, extractor: youtubeExtractor },

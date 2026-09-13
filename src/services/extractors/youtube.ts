@@ -149,7 +149,6 @@ export const youtubeExtractor: PlatformExtractor<YouTubeCardData> = {
       return {
         title,
         description: description || '',
-        snapshot,
         logo,
         ogSiteName,
         card_data: buildYouTubeCardData(videoId, channelName, channelAvatar, publishedAt, views, likes),
@@ -165,7 +164,6 @@ export const youtubeExtractor: PlatformExtractor<YouTubeCardData> = {
       return {
         title: pwData.title || 'YouTube Video',
         description: pwData.description || '',
-        snapshot: pwData.snapshot || snapshot,
         logo: pwData.logo || logo,
         ogSiteName,
         card_data: buildYouTubeCardData(
@@ -181,7 +179,6 @@ export const youtubeExtractor: PlatformExtractor<YouTubeCardData> = {
       return {
         title: 'YouTube Video',
         description: '',
-        snapshot,
         logo,
         ogSiteName,
         card_data: buildYouTubeCardData(videoId, channelName, channelAvatar, publishedAt, views, likes),

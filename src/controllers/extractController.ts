@@ -81,7 +81,6 @@ export const extractMetadataController = async (req: Request, res: Response): Pr
           : {};
         const mediaList = Array.isArray(cardDataObj.media) ? (cardDataObj.media as Array<{ url?: string }>) : [];
         const candidateSnapshot =
-          result.snapshot ||
           (typeof cardDataObj.snapshot === 'string' ? cardDataObj.snapshot : null) ||
           (mediaList[0]?.url || null);
 

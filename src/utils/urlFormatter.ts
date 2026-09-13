@@ -123,7 +123,20 @@ export function canonicalizeUrl(rawUrl: string): string {
     return `https://redd.it/${redditShortMatch[1]}`;
   }
 
-  // 5. General Web Sites
+  // 5. Pinterest Canonicalization
+  const pinMatch = preCleaned.match(
+    /(?:https?:\/\/)?(?:[a-z]{2,3}\.)?(?:pinterest\.[a-z.]+|pin\.it)\/pin\/(\d+)/i
+  );
+  if (pinMatch) {
+    const pinId = pinMatch[1];
+    return `https://www.pinterest.com/pin/${pinId}/`;
+  }
+  const pinShortMatch = preCleaned.match(/(?:https?:\/\/)?pin\.it\/([a-zA-Z0-9]+)/i);
+  if (pinShortMatch) {
+    return `https://pin.it/${pinShortMatch[1]}`;
+  }
+
+  // 6. General Web Sites
   let formatted = preCleaned;
   const spaceIdx = formatted.search(/\s/);
   if (spaceIdx > 0) {
@@ -209,6 +222,10 @@ export function isSameBookmarkUrl(urlA?: string | null, urlB?: string | null): b
   const redA = trimmedA.match(/reddit\.com\/r\/[^/\s]+\/comments\/([a-zA-Z0-9]+)/i)?.[1] || trimmedA.match(/redd\.it\/([a-zA-Z0-9]+)/i)?.[1];
   const redB = trimmedB.match(/reddit\.com\/r\/[^/\s]+\/comments\/([a-zA-Z0-9]+)/i)?.[1] || trimmedB.match(/redd\.it\/([a-zA-Z0-9]+)/i)?.[1];
   if (redA && redB && redA === redB) return true;
+
+  const pinA = trimmedA.match(/pinterest\.[a-z.]+\/pin\/(\d+)/i)?.[1] || trimmedA.match(/pin\.it\/([a-zA-Z0-9]+)/i)?.[1];
+  const pinB = trimmedB.match(/pinterest\.[a-z.]+\/pin\/(\d+)/i)?.[1] || trimmedB.match(/pin\.it\/([a-zA-Z0-9]+)/i)?.[1];
+  if (pinA && pinB && pinA === pinB) return true;
 
   return false;
 }

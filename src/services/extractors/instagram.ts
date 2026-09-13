@@ -435,7 +435,6 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
           return {
             title: pwData.title || 'Instagram Post',
             description: pwData.description || '',
-            snapshot: pwData.snapshot || finalSnapshot,
             logo: INSTAGRAM_LOGO_URL,
             ogSiteName,
             card_data: {
@@ -464,7 +463,6 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
             ? `Post by @${username} on Instagram`
             : 'Instagram Post',
       description: description || '',
-      snapshot: finalSnapshot,
       logo: INSTAGRAM_LOGO_URL,
       ogSiteName,
       card_data,
