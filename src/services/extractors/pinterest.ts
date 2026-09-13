@@ -21,7 +21,6 @@ export const pinterestExtractor: PlatformExtractor<PinterestCardData> = {
     let authorName: string | null = cheerioData?.author || null;
     let authorUsername: string | null = null;
     let authorAvatar: string | null = null;
-    let boardName: string | null = null;
 
     if (cheerioData && (title || description || snapshot)) {
       title = cleanPinTitle(title);
@@ -36,7 +35,6 @@ export const pinterestExtractor: PlatformExtractor<PinterestCardData> = {
             username: authorUsername || undefined,
             avatar_url: authorAvatar,
           },
-          board: boardName ? { name: boardName } : undefined,
           media: snapshot ? [{ type: 'image', url: snapshot }] : [],
           posted_at: cheerioData.publishedAt || null,
         },
@@ -90,7 +88,6 @@ export const pinterestExtractor: PlatformExtractor<PinterestCardData> = {
             username: authorUsername || undefined,
             avatar_url: authorAvatar,
           },
-          board: boardName ? { name: boardName } : undefined,
           media: snapshot ? [{ type: 'image', url: snapshot }] : [],
           posted_at: pwData.publishedAt || null,
         },
@@ -108,7 +105,6 @@ export const pinterestExtractor: PlatformExtractor<PinterestCardData> = {
             username: authorUsername || undefined,
             avatar_url: authorAvatar,
           },
-          board: boardName ? { name: boardName } : undefined,
           media: snapshot ? [{ type: 'image', url: snapshot }] : [],
           posted_at: null,
         },

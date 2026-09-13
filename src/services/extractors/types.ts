@@ -102,10 +102,6 @@ export interface PinterestCardData {
     username?: string;
     avatar_url?: string | null;
   };
-  board?: {
-    name?: string;
-    url?: string;
-  };
   metrics?: {
     saves?: number;
     comments?: number;
