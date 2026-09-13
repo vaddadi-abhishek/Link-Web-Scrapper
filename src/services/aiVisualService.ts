@@ -406,7 +406,7 @@ ${intentSpecificRules ? `\n${intentSpecificRules}\n` : ''}
 Requirements:
 1. **Dynamic Multi-Categorization ('ai_category')**:
    - Assign an array of 2-5 relevant categories reflecting what the bookmark represents.
-   - The categorization MUST be dynamic, unbiased, and determined organically by AI based on what the content actually represents.
+   - The categorization MUST be dynamic, unbiased, and determined organically based on what the content or the person in the image actually represents.
    - Categorize across multiple granularities: encompass broad overarching domains as well as specific classifications, topics, roles, or themes.
    - For public figures, players, creators, or professionals, include appropriate general and specific role/domain categories (e.g. broad field alongside specific role or nationality/sport classification).
    - ARTICLE CONSTRAINT: For articles, categorization must be derived strictly and exclusively from the provided 'article_content'. Keep the anti-hallucination constraint strictly active.
