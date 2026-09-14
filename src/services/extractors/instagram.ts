@@ -410,6 +410,9 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
     const finalSnapshot =
       image || mediaList.find((m) => m.type === 'image')?.url || mediaList[0]?.url || null;
 
+    const hasVideo = mediaList.some((m) => m.type === 'video');
+    const videoThumbnail = hasVideo ? finalSnapshot : null;
+
     const card_data: InstagramCardData = {
       author: {
         username,
@@ -420,6 +423,7 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
       metrics,
       media: mediaList,
       posted_at: publishedAt || new Date().toISOString(),
+      video_thumbnail: videoThumbnail,
     };
 
     // If Cheerio and embed returned nothing useful (e.g. login wall / blocked), fallback to optimized Playwright
@@ -432,6 +436,7 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
 
         if (pwData.title || pwData.description || pwData.snapshot) {
           const pwMedia: MediaItem[] = pwData.snapshot ? [{ type: 'image', url: pwData.snapshot }] : mediaList;
+          const pwHasVideo = pwMedia.some((m) => m.type === 'video');
           return {
             title: pwData.title || 'Instagram Post',
             description: pwData.description || '',
@@ -447,11 +452,12 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
               metrics,
               media: pwMedia,
               posted_at: pwData.publishedAt || publishedAt || new Date().toISOString(),
+              video_thumbnail: pwHasVideo ? (pwData.snapshot || finalSnapshot) : null,
             },
           };
         }
       } catch {
-        // Fallback to default return
+        // Playwright fallback failed, proceed with cheerio data
       }
     }
 

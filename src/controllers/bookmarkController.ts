@@ -4,7 +4,7 @@ import { dispatchExtraction, ExtractionResult } from '../services/extractors';
 import { deriveSiteName } from '../utils/siteName';
 import { validateUrlAgainstSSRF } from '../utils/ssrfValidator';
 import { analyzeVisualContext, AIVisualAnalysisResult } from '../services/aiVisualService';
-import { canonicalizeUrl } from '../utils/urlFormatter';
+import { canonicalizeUrl, isResolvableShortlink, resolveShortlink } from '../utils/urlFormatter';
 import { logger } from '../utils/logger';
 import { supabaseAdmin } from '../utils/supabaseClient';
 import {
@@ -179,8 +179,14 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
     }
 
     const trimmedUrl = rawUrl.trim();
+    // Resolve shortlinks (e.g. reddit.com/r/.../s/..., pin.it/...) to their true destination URL
+    let effectiveUrl = trimmedUrl;
+    if (isResolvableShortlink(trimmedUrl)) {
+      effectiveUrl = await resolveShortlink(trimmedUrl);
+    }
+
     // Deterministic canonicalization: strips tracking parameters, platform prefixes, trailing text
-    const canonicalUrl = canonicalizeUrl(trimmedUrl) || trimmedUrl;
+    const canonicalUrl = canonicalizeUrl(effectiveUrl) || effectiveUrl;
 
     const isSafe = await validateUrlAgainstSSRF(canonicalUrl);
     if (!isSafe) {
@@ -188,9 +194,10 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
       return;
     }
 
-    // Build comprehensive search list to catch canonical, trimmed, and platform variations
+    // Build comprehensive search list to catch canonical, effective, trimmed, and platform variations
     const searchUrls = Array.from(new Set([
       canonicalUrl,
+      effectiveUrl,
       trimmedUrl,
       canonicalUrl.replace('https://x.com', 'https://twitter.com'),
       canonicalUrl.replace('https://twitter.com', 'https://x.com'),

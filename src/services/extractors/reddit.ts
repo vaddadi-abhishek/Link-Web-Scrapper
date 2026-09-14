@@ -193,6 +193,13 @@ async function tryPullPushReddit(postId: string): Promise<ExtractionResult<Reddi
 
     const iconUrl = getSubredditIcon(subredditName, post.sr_detail?.community_icon || post.sr_detail?.icon_img);
 
+    const hasVideo = Boolean(post.is_video || postUrl.includes('v.redd.it') || mediaList.some((m) => m.type === 'video'));
+    const videoThumbnail = hasVideo
+      ? post.preview?.images?.[0]?.source?.url?.replace(/&amp;/g, '&') ||
+        (post.thumbnail && post.thumbnail.startsWith('http') && !post.thumbnail.includes('default') && !post.thumbnail.includes('nsfw') ? post.thumbnail : null) ||
+        null
+      : null;
+
     return {
       title,
       description,
@@ -210,6 +217,7 @@ async function tryPullPushReddit(postId: string): Promise<ExtractionResult<Reddi
         },
         posted_at: post.created_utc ? new Date(post.created_utc * 1000).toISOString() : new Date().toISOString(),
         media: mediaList,
+        video_thumbnail: videoThumbnail,
       },
     };
   } catch {
@@ -591,6 +599,9 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
       }
     }
 
+    const hasVideo = mediaList.some((m) => m.type === 'video');
+    const videoThumbnail = hasVideo ? (snapshot || null) : null;
+
     return {
       title,
       description: description || null,
@@ -608,6 +619,7 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
         },
         posted_at: postedAt || new Date().toISOString(),
         media: mediaList,
+        video_thumbnail: videoThumbnail,
       },
     };
   },

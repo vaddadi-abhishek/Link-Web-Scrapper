@@ -19,6 +19,7 @@ export interface XCardData {
   };
   media: MediaItem[];
   posted_at: string;
+  video_thumbnail?: string | null;
 }
 
 export interface InstagramCardData {
@@ -34,6 +35,7 @@ export interface InstagramCardData {
   };
   media: MediaItem[];
   posted_at: string;
+  video_thumbnail?: string | null;
 }
 
 export interface FacebookCardData {
@@ -48,6 +50,7 @@ export interface FacebookCardData {
   };
   media: MediaItem[];
   posted_at: string | null;
+  video_thumbnail?: string | null;
 }
 
 export interface LinkedInCardData {
@@ -67,6 +70,7 @@ export interface LinkedInCardData {
   article_content?: string | null;
   word_count?: number | null;
   reading_time_minutes?: number | null;
+  video_thumbnail?: string | null;
 }
 
 export interface RedditCardData {
@@ -81,6 +85,7 @@ export interface RedditCardData {
   };
   posted_at: string | null;
   media: MediaItem[];
+  video_thumbnail?: string | null;
 }
 
 export interface YouTubeCardData {
@@ -94,6 +99,7 @@ export interface YouTubeCardData {
   };
   video_id: string | null;
   posted_at: string | null;
+  video_thumbnail?: string | null;
 }
 
 export interface PinterestCardData {
@@ -109,6 +115,7 @@ export interface PinterestCardData {
   };
   media?: MediaItem[];
   posted_at?: string | null;
+  video_thumbnail?: string | null;
 }
 
 export interface GlobalWebCardData {

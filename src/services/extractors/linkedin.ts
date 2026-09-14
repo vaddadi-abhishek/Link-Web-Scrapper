@@ -420,6 +420,9 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
 
     const finalDescription = description ? cleanLinkedInText(cleanDescription(description)) : '';
 
+    const hasVideo = Boolean(videoUrl || mediaList.some((m) => m.type === 'video'));
+    const videoThumbnail = hasVideo ? (primarySnapshot || snapshot || null) : null;
+
     return {
       title: isArticle ? (articleTitle ? cleanTitle(articleTitle) : null) : null,
       description: finalDescription,
@@ -437,6 +440,7 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
         },
         media: mediaList,
         posted_at: publishedAt || new Date().toISOString(),
+        video_thumbnail: videoThumbnail,
         ...(isArticle
           ? {
               type: 'article',

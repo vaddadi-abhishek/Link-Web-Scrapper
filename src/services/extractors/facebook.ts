@@ -916,6 +916,8 @@ export const facebookExtractor: PlatformExtractor<FacebookCardData> = {
     }
 
     const finalDescription = rawDesc ? cleanDescription(rawDesc) || '' : '';
+    const hasVideo = media.some((m) => m.type === 'video');
+    const videoThumbnail = hasVideo ? (snapshot || candidateImage || null) : null;
 
     return {
       title: null, // Title is null for Facebook (no post titles, only author & description)
@@ -930,6 +932,7 @@ export const facebookExtractor: PlatformExtractor<FacebookCardData> = {
         metrics,
         media,
         posted_at: publishedAt || new Date().toISOString(),
+        video_thumbnail: videoThumbnail,
       },
     };
   },

@@ -20,7 +20,8 @@ const buildYouTubeCardData = (
   channelAvatar: string | null,
   publishedAt: string | null,
   views: number = 0,
-  likes: number = 0
+  likes: number = 0,
+  videoThumbnail: string | null = null
 ): YouTubeCardData => {
   return {
     channel: {
@@ -33,6 +34,7 @@ const buildYouTubeCardData = (
     },
     video_id: videoId,
     posted_at: publishedAt || new Date().toISOString(),
+    video_thumbnail: videoThumbnail || (videoId ? `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg` : null),
   };
 };
 
@@ -151,7 +153,7 @@ export const youtubeExtractor: PlatformExtractor<YouTubeCardData> = {
         description: description || '',
         logo,
         ogSiteName,
-        card_data: buildYouTubeCardData(videoId, channelName, channelAvatar, publishedAt, views, likes),
+        card_data: buildYouTubeCardData(videoId, channelName, channelAvatar, publishedAt, views, likes, snapshot),
       };
     }
 
@@ -172,7 +174,8 @@ export const youtubeExtractor: PlatformExtractor<YouTubeCardData> = {
           channelAvatar || pwData.authorAvatar,
           publishedAt || pwData.publishedAt,
           views,
-          likes
+          likes,
+          pwData.snapshot || snapshot
         ),
       };
     } catch {
@@ -181,7 +184,7 @@ export const youtubeExtractor: PlatformExtractor<YouTubeCardData> = {
         description: '',
         logo,
         ogSiteName,
-        card_data: buildYouTubeCardData(videoId, channelName, channelAvatar, publishedAt, views, likes),
+        card_data: buildYouTubeCardData(videoId, channelName, channelAvatar, publishedAt, views, likes, snapshot),
       };
     }
   },

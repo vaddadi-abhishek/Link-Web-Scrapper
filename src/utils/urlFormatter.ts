@@ -1,3 +1,5 @@
+import axios from 'axios';
+
 /**
  * URL normalization, resolution, and canonicalization utilities.
  */
@@ -63,6 +65,62 @@ function cleanRawUrlInput(rawInput: string): string {
 }
 
 /**
+ * Detects if a URL is a known shortlink/sharelink that redirects to a canonical destination.
+ */
+export function isResolvableShortlink(url: string | null | undefined): boolean {
+  if (!url || typeof url !== 'string') return false;
+  const lower = url.trim().toLowerCase();
+  return (
+    /reddit\.com\/(?:r\/[^/\s]+\/)?s\/[a-zA-Z0-9_-]+/i.test(lower) ||
+    /redd\.it\/[a-zA-Z0-9_-]+/i.test(lower) ||
+    /pin\.it\/[a-zA-Z0-9_-]+/i.test(lower) ||
+    /t\.co\/[a-zA-Z0-9_-]+/i.test(lower) ||
+    /bit\.ly\/[a-zA-Z0-9_-]+/i.test(lower) ||
+    /tinyurl\.com\/[a-zA-Z0-9_-]+/i.test(lower)
+  );
+}
+
+/**
+ * Resolves redirect shortlinks (e.g. reddit.com/r/sub/s/xyz, pin.it/xyz) to their final destination URL.
+ */
+export async function resolveShortlink(url: string, timeoutMs: number = 3000): Promise<string> {
+  if (!isResolvableShortlink(url)) {
+    return url;
+  }
+  try {
+    const res = await axios.get(url, {
+      maxRedirects: 5,
+      timeout: timeoutMs,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+      validateStatus: (status) => status < 400,
+    });
+    const finalUrl = res.request?.res?.responseUrl || res.request?.responseURL;
+    if (finalUrl && typeof finalUrl === 'string' && finalUrl.startsWith('http')) {
+      return finalUrl;
+    }
+  } catch {
+    try {
+      const manualRes = await axios.get(url, {
+        maxRedirects: 0,
+        timeout: timeoutMs,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        },
+        validateStatus: (status) => status >= 300 && status < 400,
+      });
+      const loc = manualRes.headers?.location;
+      if (loc) {
+        return loc.startsWith('http') ? loc : new URL(loc, url).toString();
+      }
+    } catch {}
+  }
+  return url;
+}
+
+/**
  * Produces a deterministic canonical URL for social media and general web links.
  * Strips tracking query parameters, normalizes path aliases (e.g. Instagram /reels/ vs /reel/),
  * and unifies hostnames so identical content shares the exact same cache key.
@@ -110,12 +168,35 @@ export function canonicalizeUrl(rawUrl: string): string {
   }
 
   // 4. Reddit Canonicalization
-  const redditMatch = preCleaned.match(
+  // 4a. Check for Comment URL first (so /comment/ID is not lost)
+  const redditCommentMatch = preCleaned.match(
+    /(?:https?:\/\/)?(?:www\.|old\.)?reddit\.com\/r\/([^/\s]+)\/comments\/([a-zA-Z0-9]+)(?:\/[^/\s]+)?\/comment\/([a-zA-Z0-9]+)/i
+  );
+  if (redditCommentMatch) {
+    const subreddit = redditCommentMatch[1].toLowerCase();
+    const postId = redditCommentMatch[2];
+    const commentId = redditCommentMatch[3];
+    return `https://www.reddit.com/r/${subreddit}/comments/${postId}/comment/${commentId}/`;
+  }
+
+  // 4b. Check for Old-style Comment URL: /r/sub/comments/POST_ID/slug/COMMENT_ID/ (comment ID is >= 6 chars alphanumeric)
+  const oldCommentMatch = preCleaned.match(
+    /(?:https?:\/\/)?(?:www\.|old\.)?reddit\.com\/r\/([^/\s]+)\/comments\/([a-zA-Z0-9]+)\/[^/\s]+\/([a-zA-Z0-9]{6,})(?:\/|$|\?)/i
+  );
+  if (oldCommentMatch && !['comment', 'comments', 'live', 'photos', 'video'].includes(oldCommentMatch[3].toLowerCase())) {
+    const subreddit = oldCommentMatch[1].toLowerCase();
+    const postId = oldCommentMatch[2];
+    const commentId = oldCommentMatch[3];
+    return `https://www.reddit.com/r/${subreddit}/comments/${postId}/comment/${commentId}/`;
+  }
+
+  // 4c. Check for Standard Post URL
+  const redditPostMatch = preCleaned.match(
     /(?:https?:\/\/)?(?:www\.|old\.)?reddit\.com\/r\/([^/\s]+)\/comments\/([a-zA-Z0-9]+)/i
   );
-  if (redditMatch) {
-    const subreddit = redditMatch[1].toLowerCase();
-    const postId = redditMatch[2];
+  if (redditPostMatch) {
+    const subreddit = redditPostMatch[1].toLowerCase();
+    const postId = redditPostMatch[2];
     return `https://www.reddit.com/r/${subreddit}/comments/${postId}/`;
   }
   const redditShortMatch = preCleaned.match(/(?:https?:\/\/)?redd\.it\/([a-zA-Z0-9]+)/i);
@@ -219,9 +300,16 @@ export function isSameBookmarkUrl(urlA?: string | null, urlB?: string | null): b
   const ytB = trimmedB.match(/(?:youtube\.com\/(?:watch\?.*v=|shorts\/|embed\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/i)?.[1];
   if (ytA && ytB && ytA === ytB) return true;
 
+  // Reddit comparison: distinguish between post-level links and specific comment links
   const redA = trimmedA.match(/reddit\.com\/r\/[^/\s]+\/comments\/([a-zA-Z0-9]+)/i)?.[1] || trimmedA.match(/redd\.it\/([a-zA-Z0-9]+)/i)?.[1];
   const redB = trimmedB.match(/reddit\.com\/r\/[^/\s]+\/comments\/([a-zA-Z0-9]+)/i)?.[1] || trimmedB.match(/redd\.it\/([a-zA-Z0-9]+)/i)?.[1];
-  if (redA && redB && redA === redB) return true;
+  if (redA && redB && redA === redB) {
+    const commentA = trimmedA.match(/\/comment\/([a-zA-Z0-9]+)/i)?.[1] || trimmedA.match(/comments\/[a-zA-Z0-9]+\/[^/\s]+\/([a-zA-Z0-9]{6,})/i)?.[1];
+    const commentB = trimmedB.match(/\/comment\/([a-zA-Z0-9]+)/i)?.[1] || trimmedB.match(/comments\/[a-zA-Z0-9]+\/[^/\s]+\/([a-zA-Z0-9]{6,})/i)?.[1];
+    if (!commentA && !commentB) return true;
+    if (commentA && commentB && commentA === commentB) return true;
+    return false;
+  }
 
   const pinA = trimmedA.match(/pinterest\.[a-z.]+\/pin\/(\d+)/i)?.[1] || trimmedA.match(/pin\.it\/([a-zA-Z0-9]+)/i)?.[1];
   const pinB = trimmedB.match(/pinterest\.[a-z.]+\/pin\/(\d+)/i)?.[1] || trimmedB.match(/pin\.it\/([a-zA-Z0-9]+)/i)?.[1];

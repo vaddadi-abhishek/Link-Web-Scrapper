@@ -3,7 +3,7 @@ import { dispatchExtraction } from '../services/extractors';
 import { deriveSiteName } from '../utils/siteName';
 import { validateUrlAgainstSSRF } from '../utils/ssrfValidator';
 import { analyzeVisualContext } from '../services/aiVisualService';
-import { canonicalizeUrl } from '../utils/urlFormatter';
+import { canonicalizeUrl, isResolvableShortlink, resolveShortlink } from '../utils/urlFormatter';
 import { extractionCache } from '../utils/cache';
 import { logger } from '../utils/logger';
 
@@ -30,8 +30,13 @@ export const extractMetadataController = async (req: Request, res: Response): Pr
       return;
     }
 
+    let effectiveUrl = rawUrl.trim();
+    if (isResolvableShortlink(effectiveUrl)) {
+      effectiveUrl = await resolveShortlink(effectiveUrl);
+    }
+
     // Canonicalize the URL (strips tracking query params, unifies /reels/ to /reel/, normalizes hostnames)
-    const canonicalUrl = canonicalizeUrl(rawUrl);
+    const canonicalUrl = canonicalizeUrl(effectiveUrl) || effectiveUrl;
     
     const html = req.body?.html;
     const forceRefresh = Boolean(

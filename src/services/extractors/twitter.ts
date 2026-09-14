@@ -73,6 +73,15 @@ async function tryFxTwitterApi(tweetId: string, targetUrl: string): Promise<Extr
     const postedAt = tweet.created_at
       ? new Date(tweet.created_at).toISOString()
       : new Date().toISOString();
+    const hasVideo = mediaList.some((m) => m.type === 'video');
+    let videoThumbnail: string | null = null;
+    if (hasVideo) {
+      videoThumbnail =
+        tweet.media?.videos?.[0]?.thumbnail_url ||
+        tweet.media?.photos?.[0]?.url ||
+        snapshot ||
+        null;
+    }
 
     return {
       title,
@@ -89,6 +98,7 @@ async function tryFxTwitterApi(tweetId: string, targetUrl: string): Promise<Extr
         metrics,
         media: mediaList,
         posted_at: postedAt,
+        video_thumbnail: videoThumbnail,
       },
     };
   } catch {
@@ -139,6 +149,19 @@ async function tryVxTwitterApi(tweetId: string, targetUrl: string): Promise<Extr
     if (data.retweets !== undefined && data.retweets !== null) metrics.reposts = data.retweets;
     if (data.likes !== undefined && data.likes !== null) metrics.likes = data.likes;
 
+    const hasVideo = mediaList.some((m) => m.type === 'video');
+    let videoThumbnail: string | null = null;
+    if (hasVideo) {
+      const vidObj = Array.isArray(data.media_extended)
+        ? data.media_extended.find((m: Record<string, unknown>) => m.type === 'video' || m.type === 'gif')
+        : null;
+      videoThumbnail =
+        (typeof vidObj?.thumbnail_url === 'string' ? vidObj.thumbnail_url : null) ||
+        data.mediaURLs?.[0] ||
+        snapshot ||
+        null;
+    }
+
     return {
       title,
       description,
@@ -154,6 +177,7 @@ async function tryVxTwitterApi(tweetId: string, targetUrl: string): Promise<Extr
         metrics,
         media: mediaList,
         posted_at: data.date ? new Date(data.date).toISOString() : new Date().toISOString(),
+        video_thumbnail: videoThumbnail,
       },
     };
   } catch {
