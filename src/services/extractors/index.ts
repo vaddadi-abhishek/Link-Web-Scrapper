@@ -8,7 +8,7 @@ import { youtubeExtractor } from './youtube';
 import { pinterestExtractor } from './pinterest';
 import { globalWebExtractor } from './globalWeb';
 import { extractionCache } from '../../utils/cache';
-import { canonicalizeUrl } from '../../utils/urlFormatter';
+import { canonicalizeUrl, isResolvableShortlink, resolveShortlink } from '../../utils/urlFormatter';
 import { logger } from '../../utils/logger';
 
 export * from './types';
@@ -57,7 +57,12 @@ export async function dispatchExtraction(
   html?: string,
   options?: DispatchOptions
 ): Promise<{ result: ExtractionResult; platform: string; cached?: boolean }> {
-  const canonicalUrl = canonicalizeUrl(targetUrl) || targetUrl.trim();
+  let effectiveUrl = targetUrl.trim();
+  if (isResolvableShortlink(effectiveUrl)) {
+    effectiveUrl = await resolveShortlink(effectiveUrl);
+  }
+
+  const canonicalUrl = canonicalizeUrl(effectiveUrl) || effectiveUrl;
   const cacheKey = canonicalUrl;
   const bypassCache = Boolean(options?.forceRefresh || html);
 
@@ -72,11 +77,11 @@ export async function dispatchExtraction(
     }
   }
 
-  const extractor = getExtractorForUrl(targetUrl);
-  const result = await extractor.extract(targetUrl, html);
+  const extractor = getExtractorForUrl(effectiveUrl);
+  const result = await extractor.extract(effectiveUrl, html);
   const response = {
     result,
-    platform: extractor.platformKey,
+    platform: result.type || (result.card_data as any)?.type || extractor.platformKey,
   };
 
   // Cache successful extractions (30-minute default TTL)

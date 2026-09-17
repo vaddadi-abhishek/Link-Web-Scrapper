@@ -3,6 +3,7 @@ import { authMiddleware } from '../middleware/authMiddleware';
 import {
   getBookmarksController,
   createBookmarkController,
+  getBookmarkArticleController,
   generateAiForBookmarkController,
   deleteBookmarkController,
   getUserPlanController,
@@ -17,6 +18,7 @@ router.use(authMiddleware);
 // Bookmark CRUD & AI Triggers
 router.get('/bookmarks', getBookmarksController);
 router.post('/bookmarks', createBookmarkController);
+router.get('/bookmarks/:id/article', getBookmarkArticleController);
 router.post('/bookmarks/:id/generate-ai', generateAiForBookmarkController);
 router.delete('/bookmarks/:id', deleteBookmarkController);
 

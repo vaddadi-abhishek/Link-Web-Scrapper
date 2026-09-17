@@ -1,10 +1,11 @@
 import { Response } from 'express';
 import { AuthenticatedRequest } from '../middleware/authMiddleware';
 import { dispatchExtraction, ExtractionResult } from '../services/extractors';
+import { ArticleData } from '../services/extractors/types';
 import { deriveSiteName } from '../utils/siteName';
 import { validateUrlAgainstSSRF } from '../utils/ssrfValidator';
 import { analyzeVisualContext, AIVisualAnalysisResult } from '../services/aiVisualService';
-import { canonicalizeUrl, isResolvableShortlink, resolveShortlink } from '../utils/urlFormatter';
+import { canonicalizeUrl, isResolvableShortlink, resolveShortlink, extractLinkedInPostId } from '../utils/urlFormatter';
 import { logger } from '../utils/logger';
 import { supabaseAdmin } from '../utils/supabaseClient';
 import {
@@ -32,6 +33,7 @@ export interface BookmarkDbRow {
   site_name?: string | null;
   type?: string | null;
   card_data?: Record<string, unknown> | null;
+  is_article?: boolean | null;
   ai_status?: 'completed' | 'pending_manual' | 'no_credits' | 'failed' | string;
   created_at: string;
   ai_context?: AiContextDbRow | AiContextDbRow[] | null;
@@ -44,9 +46,12 @@ export interface BookmarkResponse {
   title: string;
   description: string;
   logo: string | null;
+  snapshot_url?: string | null;
+  snapshot?: string | null;
   site_name: string;
   type: string;
   card_data?: Record<string, unknown>;
+  is_article?: boolean;
   ai_status: string;
   created_at: string;
   ai_context: string | null;
@@ -74,9 +79,28 @@ function mapBookmarkRow(row: BookmarkDbRow): BookmarkResponse {
   );
   const resolvedStatus = hasAiContext ? 'completed' : (row.ai_status || 'pending_manual');
 
-  const cardData = row.card_data ? { ...row.card_data } : undefined;
-  if (cardData && !cardData.snapshot && row.snapshot_url && (row.type === 'generic' || !row.type)) {
-    cardData.snapshot = row.snapshot_url;
+  let cardData: Record<string, unknown> | undefined = undefined;
+  if (row.card_data) {
+    if (typeof row.card_data === 'string') {
+      try {
+        cardData = JSON.parse(row.card_data);
+      } catch {
+        cardData = undefined;
+      }
+    } else if (typeof row.card_data === 'object' && row.card_data !== null) {
+      cardData = { ...row.card_data };
+    }
+  }
+
+  const resolvedSnapshotUrl =
+    row.snapshot_url ||
+    (typeof cardData?.snapshot === 'string' ? cardData.snapshot : null);
+
+  if (cardData && !cardData.snapshot && resolvedSnapshotUrl) {
+    cardData.snapshot = resolvedSnapshotUrl;
+  }
+  if (!cardData && resolvedSnapshotUrl) {
+    cardData = { snapshot: resolvedSnapshotUrl };
   }
 
   return {
@@ -86,9 +110,12 @@ function mapBookmarkRow(row: BookmarkDbRow): BookmarkResponse {
     title: row.title || row.url,
     description: row.description || '',
     logo: row.logo_url || null,
+    snapshot_url: resolvedSnapshotUrl,
+    snapshot: resolvedSnapshotUrl,
     site_name: row.site_name || '',
     type: row.type || 'generic',
     card_data: cardData,
+    is_article: Boolean(row.is_article),
     ai_status: resolvedStatus,
     created_at: row.created_at,
     ai_context: aiCtx?.context || null,
@@ -201,12 +228,26 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
       trimmedUrl,
       canonicalUrl.replace('https://x.com', 'https://twitter.com'),
       canonicalUrl.replace('https://twitter.com', 'https://x.com'),
+      canonicalUrl.replace('https://www.linkedin.com', 'https://linkedin.com'),
+      canonicalUrl.replace('https://linkedin.com', 'https://www.linkedin.com'),
+      canonicalUrl + '/',
+      canonicalUrl.replace('https://www.linkedin.com', 'https://linkedin.com') + '/',
       canonicalUrl.replace('/reel/', '/reels/'),
       canonicalUrl.replace('/reels/', '/reel/'),
     ])).filter(Boolean);
 
+    const linkedInPostId = extractLinkedInPostId(canonicalUrl) || extractLinkedInPostId(effectiveUrl) || extractLinkedInPostId(trimmedUrl);
+    if (linkedInPostId) {
+      searchUrls.push(
+        `https://www.linkedin.com/feed/update/urn:li:activity:${linkedInPostId}`,
+        `https://www.linkedin.com/feed/update/urn:li:activity:${linkedInPostId}/`,
+        `https://www.linkedin.com/feed/update/urn:li:share:${linkedInPostId}`,
+        `https://www.linkedin.com/feed/update/urn:li:share:${linkedInPostId}/`
+      );
+    }
+
     // 1. User duplicate check: has THIS user already bookmarked this URL?
-    const { data: existingUserBm } = await supabase
+    let { data: existingUserBm } = await supabase
       .from('bookmarks')
       .select('*, ai_context(*)')
       .eq('user_id', userId)
@@ -214,6 +255,50 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle();
+
+    // 1b. Fallback check for existing LinkedIn posts:
+    // If exact searchUrls didn't match, check if user has a bookmark containing the same numeric post ID
+    if (!existingUserBm && linkedInPostId) {
+      const { data: candidateBms } = await supabase
+        .from('bookmarks')
+        .select('*, ai_context(*)')
+        .eq('user_id', userId)
+        .ilike('url', `%${linkedInPostId}%`)
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (candidateBms && candidateBms.length > 0) {
+        existingUserBm = candidateBms[0];
+      }
+    }
+
+    // 1c. Backward-compatibility check: If user saved a shortlink (e.g. lnkd.in) prior to this fix,
+    // resolve any shortlink bookmarks the user has to see if they point to this same canonical URL or post ID
+    if (!existingUserBm && (trimmedUrl.includes('linkedin.com') || trimmedUrl.includes('lnkd.in'))) {
+      const { data: shortlinkBms } = await supabase
+        .from('bookmarks')
+        .select('*, ai_context(*)')
+        .eq('user_id', userId)
+        .ilike('url', '%lnkd.in%')
+        .order('created_at', { ascending: false })
+        .limit(10);
+
+      if (shortlinkBms && shortlinkBms.length > 0) {
+        for (const bm of shortlinkBms) {
+          try {
+            const resolved = await resolveShortlink(bm.url);
+            const canonicalResolved = canonicalizeUrl(resolved);
+            if (
+              canonicalResolved === canonicalUrl ||
+              (linkedInPostId && extractLinkedInPostId(resolved) === linkedInPostId)
+            ) {
+              existingUserBm = bm;
+              break;
+            }
+          } catch {}
+        }
+      }
+    }
 
     if (existingUserBm) {
       logger.info('BookmarkController', `Duplicate URL posted by user ${userId}: ${canonicalUrl}. Returning existing bookmark (0 credits used).`);
@@ -246,6 +331,8 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
     let snapshotUrl: string | null = null;
     let aiStatus: 'completed' | 'pending_manual' | 'no_credits' | 'failed' = 'pending_manual';
     let aiAnalysisResult: AIVisualAnalysisResult | null = null;
+    let isArticle = false;
+    let extractedArticle: ArticleData | null = null;
 
     if (existingGlobal) {
       const prevBm = existingGlobal.bookmark;
@@ -253,6 +340,7 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
       platform = prevBm.type || 'generic';
       siteName = prevBm.site_name || '';
       snapshotUrl = prevBm.snapshot_url || null;
+      isArticle = Boolean(prevBm.is_article);
       metadataResult = {
         title: prevBm.title,
         description: prevBm.description || '',
@@ -271,9 +359,12 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
     } else {
       // Fresh URL: Scrape metadata
       const { result, platform: extractedPlatform } = await dispatchExtraction(canonicalUrl);
-      platform = extractedPlatform;
+      platform = (result as ExtractionResult).type || extractedPlatform;
       metadataResult = result as ExtractionResult;
       siteName = deriveSiteName(canonicalUrl, result.ogSiteName);
+
+      extractedArticle = (result as ExtractionResult).article || null;
+      isArticle = Boolean(extractedArticle);
 
       const cardDataObj = typeof result.card_data === 'object' && result.card_data !== null
         ? (result.card_data as Record<string, unknown>)
@@ -333,6 +424,7 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
         site_name: siteName,
         type: platform,
         card_data: metadataResult.card_data || null,
+        is_article: isArticle,
         ai_status: aiStatus,
       })
       .select()
@@ -365,6 +457,44 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
         logger.error('BookmarkController', 'Failed to insert ai_context into Supabase:', aiError.message);
       } else {
         savedAiContext = aiRow as AiContextDbRow;
+      }
+    }
+
+    // 5. Insert into articles table if article was extracted
+    if (isArticle && extractedArticle) {
+      const { error: articleError } = await supabase
+        .from('articles')
+        .insert({
+          bookmark_id: bookmarkRow.id,
+          user_id: userId,
+          content_html: extractedArticle.content_html,
+          word_count: extractedArticle.word_count,
+          reading_time_minutes: extractedArticle.reading_time_minutes,
+        });
+
+      if (articleError) {
+        logger.error('BookmarkController', 'Failed to insert article into Supabase:', articleError.message);
+      }
+    } else if (isArticle && existingGlobal) {
+      // Reusing existing article for this canonical URL
+      try {
+        const { data: existingArticle } = await supabaseAdmin
+          .from('articles')
+          .select('content_html, word_count, reading_time_minutes')
+          .eq('bookmark_id', existingGlobal.bookmark.id)
+          .maybeSingle();
+
+        if (existingArticle) {
+          await supabase.from('articles').insert({
+            bookmark_id: bookmarkRow.id,
+            user_id: userId,
+            content_html: existingArticle.content_html,
+            word_count: existingArticle.word_count,
+            reading_time_minutes: existingArticle.reading_time_minutes || 1,
+          });
+        }
+      } catch (err: unknown) {
+        logger.warn('BookmarkController', 'Could not copy existing article content:', err);
       }
     }
 
@@ -638,5 +768,66 @@ export async function updateUserSettingsController(req: AuthenticatedRequest, re
     const message = err instanceof Error ? err.message : String(err);
     logger.error('BookmarkController', 'Error updating user settings:', message);
     res.status(500).json({ error: 'Failed to update user settings.' });
+  }
+}
+
+/**
+ * GET /api/v1/bookmarks/:id/article
+ * Returns full reader-mode article content for a specific bookmark.
+ */
+export async function getBookmarkArticleController(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const supabase = req.supabase!;
+    const userId = req.user!.id;
+    const bookmarkId = req.params.id;
+
+    if (!bookmarkId) {
+      res.status(400).json({ error: 'Missing bookmark ID in URL params.' });
+      return;
+    }
+
+    const { data: article, error } = await supabase
+      .from('articles')
+      .select('bookmark_id, content_html, word_count, reading_time_minutes, created_at, bookmarks(id, title, url, site_name, description, logo_url)')
+      .eq('bookmark_id', bookmarkId)
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (error) {
+      logger.error('BookmarkController', `Failed to fetch article for bookmark ${bookmarkId}:`, error.message);
+      res.status(500).json({ error: error.message });
+      return;
+    }
+
+    if (!article) {
+      res.status(404).json({ error: 'Article not found for this bookmark.' });
+      return;
+    }
+
+    const bm = (Array.isArray(article.bookmarks) ? article.bookmarks[0] : article.bookmarks) as {
+      id?: string;
+      title?: string | null;
+      url?: string | null;
+      site_name?: string | null;
+      description?: string | null;
+      logo_url?: string | null;
+    } | null;
+
+    res.status(200).json({
+      bookmark_id: article.bookmark_id,
+      content_html: article.content_html,
+      word_count: article.word_count,
+      reading_time_minutes: article.reading_time_minutes,
+      created_at: article.created_at,
+      title: bm?.title || null,
+      url: bm?.url || null,
+      site_name: bm?.site_name || null,
+      description: bm?.description || null,
+      logo_url: bm?.logo_url || null,
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error('BookmarkController', 'Error in getBookmarkArticle:', message);
+    res.status(500).json({ error: 'Internal server error while fetching article.' });
   }
 }

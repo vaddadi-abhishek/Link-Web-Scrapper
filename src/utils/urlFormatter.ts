@@ -38,6 +38,17 @@ const TRACKING_QUERY_PARAMS = new Set([
   '_gl',
   '_hsenc',      // HubSpot
   '_hsmi',
+  'rcm',         // LinkedIn referral/tracking
+  'trk',         // LinkedIn tracking
+  'trackingId',  // LinkedIn tracking ID
+  'refId',       // LinkedIn ref ID
+  'midToken',    // LinkedIn token
+  'midSig',      // LinkedIn signature
+  'trkInfo',     // LinkedIn tracking info
+  'originalSubdomain', // LinkedIn subdomain tracking
+  'original_referer',  // LinkedIn referer
+  'lipi',        // LinkedIn page instance
+  'licu',        // LinkedIn custom tracking
 ]);
 
 /**
@@ -76,7 +87,8 @@ export function isResolvableShortlink(url: string | null | undefined): boolean {
     /pin\.it\/[a-zA-Z0-9_-]+/i.test(lower) ||
     /t\.co\/[a-zA-Z0-9_-]+/i.test(lower) ||
     /bit\.ly\/[a-zA-Z0-9_-]+/i.test(lower) ||
-    /tinyurl\.com\/[a-zA-Z0-9_-]+/i.test(lower)
+    /tinyurl\.com\/[a-zA-Z0-9_-]+/i.test(lower) ||
+    /(?:lnkd\.in|linkd\.in)\/[a-zA-Z0-9_\/-]+/i.test(lower)
   );
 }
 
@@ -217,7 +229,20 @@ export function canonicalizeUrl(rawUrl: string): string {
     return `https://pin.it/${pinShortMatch[1]}`;
   }
 
-  // 6. General Web Sites
+  // 6. LinkedIn Canonicalization
+  // Matches: linkedin.com/posts/..., linkedin.com/feed/update/..., linkedin.com/pulse/...
+  const linkedInMatch = preCleaned.match(
+    /(?:https?:\/\/)?(?:[a-z]{2,3}\.|www\.|mobile\.)?linkedin\.com\/(posts\/[a-zA-Z0-9_.\-%]+|feed\/update\/urn:li:[a-zA-Z0-9_:]+|pulse\/[a-zA-Z0-9_.\-%]+)/i
+  );
+  if (linkedInMatch) {
+    let cleanPath = linkedInMatch[1];
+    if (cleanPath.endsWith('/')) {
+      cleanPath = cleanPath.slice(0, -1);
+    }
+    return `https://www.linkedin.com/${cleanPath}`;
+  }
+
+  // 7. General Web Sites
   let formatted = preCleaned;
   const spaceIdx = formatted.search(/\s/);
   if (spaceIdx > 0) {
@@ -275,6 +300,17 @@ export function canonicalizeUrl(rawUrl: string): string {
 }
 
 /**
+ * Extracts numeric activity or share ID from a LinkedIn URL if present.
+ */
+export function extractLinkedInPostId(url: string | null | undefined): string | null {
+  if (!url || typeof url !== 'string') return null;
+  const match = url.match(/(?:activity[-:]|share[-:]|posts\/[a-zA-Z0-9_.\-%]*?-)(\d{18,20})/i);
+  if (match) return match[1];
+  const genericMatch = url.match(/linkedin\.com\/.*?(?:activity|share|posts).*?(\d{18,20})/i);
+  return genericMatch ? genericMatch[1] : null;
+}
+
+/**
  * Checks if two URLs represent the exact same piece of content by comparing
  * their canonical strings as well as platform entity identifiers.
  */
@@ -314,6 +350,10 @@ export function isSameBookmarkUrl(urlA?: string | null, urlB?: string | null): b
   const pinA = trimmedA.match(/pinterest\.[a-z.]+\/pin\/(\d+)/i)?.[1] || trimmedA.match(/pin\.it\/([a-zA-Z0-9]+)/i)?.[1];
   const pinB = trimmedB.match(/pinterest\.[a-z.]+\/pin\/(\d+)/i)?.[1] || trimmedB.match(/pin\.it\/([a-zA-Z0-9]+)/i)?.[1];
   if (pinA && pinB && pinA === pinB) return true;
+
+  const linkedInIdA = extractLinkedInPostId(trimmedA);
+  const linkedInIdB = extractLinkedInPostId(trimmedB);
+  if (linkedInIdA && linkedInIdB && linkedInIdA === linkedInIdB) return true;
 
   return false;
 }

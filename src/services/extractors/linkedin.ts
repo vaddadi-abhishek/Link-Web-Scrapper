@@ -18,11 +18,54 @@ export function isLinkedInArticleUrl(url: string): boolean {
   }
 }
 
+export function isLinkedInTopicCollectionUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const path = parsed.pathname.toLowerCase();
+    return path.includes('/top-content/') || path.includes('/topic/');
+  } catch {
+    return false;
+  }
+}
+
+export function isLinkedInNewsStoryUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const path = parsed.pathname.toLowerCase();
+    return path.includes('/news/story/') || path.includes('/news/');
+  } catch {
+    return false;
+  }
+}
+
+export function isLinkedInNewsletterUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const path = parsed.pathname.toLowerCase();
+    return path.includes('/newsletters/') || path.includes('/newsletter/');
+  } catch {
+    return false;
+  }
+}
+
 function cleanLinkedInText(text: string | null): string {
   if (!text) return '';
   return text
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '')
+    .replace(/^[\s\r\n"\\]+|[\s\r\n"}\\]+$/g, '')
     .replace(/\s*\|\s*[\d,.]+[KMBkmb]?\s*comments(?:\s+on\s+LinkedIn)?/gi, '')
     .replace(/\s*\|\s*LinkedIn\s*$/i, '')
+    .replace(/[ \t]+/g, ' ')
+    .trim();
+}
+
+function cleanLinkedInTitle(title: string | null): string {
+  if (!title) return '';
+  return title
+    .replace(/\s*\|\s*[^|]*?(?:posted|on LinkedIn|LinkedIn).*$/gi, '')
+    .replace(/\s*\|\s*LinkedIn.*$/gi, '')
     .trim();
 }
 
@@ -62,6 +105,34 @@ function isExcludedPostMedia(url: string | null): boolean {
   );
 }
 
+export function getMainPostElement($: cheerio.CheerioAPI): cheerio.Cheerio<any> {
+  // 1. Primary post article in public view (explicitly NOT related posts / crosslinks)
+  const primaryArticle = $('article:not(.related-posts__crosslink):not([class*="related-posts"])').first();
+  if (primaryArticle.length > 0) return primaryArticle;
+
+  // 2. Activity card with comments (top post container)
+  const activityCard = $(
+    '.main-feed-activity-card-with-comments, .main-feed-activity-card:not(.related-posts__crosslink):not([class*="related-posts"])'
+  ).first();
+  if (activityCard.length > 0) return activityCard;
+
+  // 3. Feed shared update container
+  const feedShared = $('.feed-shared-update-v2').first();
+  if (feedShared.length > 0) return feedShared;
+
+  // 4. Fallback to first article or main
+  const firstArticle = $('article').first();
+  if (firstArticle.length > 0) return firstArticle;
+
+  return $('main').first().length > 0 ? $('main').first() : $('body');
+}
+
+export function isInsideRelatedPosts($el: cheerio.Cheerio<any>): boolean {
+  return (
+    $el.closest('.related-posts, .related-posts__crosslink, [class*="related-posts"], [data-test-id*="related"]').length > 0
+  );
+}
+
 function parseLinkedInJsonLd(html: string): {
   authorName: string | null;
   authorAvatar: string | null;
@@ -74,6 +145,9 @@ function parseLinkedInJsonLd(html: string): {
   comments: number;
   reposts: number;
   isArticleType: boolean;
+  isTopicCollection: boolean;
+  isNewsStory: boolean;
+  isNewsletter: boolean;
   headline: string | null;
 } {
   let authorName: string | null = null;
@@ -87,6 +161,9 @@ function parseLinkedInJsonLd(html: string): {
   let comments = 0;
   let reposts = 0;
   let isArticleType = false;
+  let isTopicCollection = false;
+  let isNewsStory = false;
+  let isNewsletter = false;
   let headline: string | null = null;
 
   try {
@@ -95,11 +172,29 @@ function parseLinkedInJsonLd(html: string): {
       try {
         const json = JSON.parse($(s).text() || '{}');
         const type = json['@type'] || '';
-        const isArticleSchema = type === 'Article' || type === 'BlogPosting' || type === 'NewsArticle';
+        const isArticleSchema = type === 'Article' || type === 'BlogPosting';
         if (isArticleSchema) {
           isArticleType = true;
           if (json.headline && typeof json.headline === 'string') {
             headline = json.headline.trim();
+          }
+        }
+        if (type === 'CollectionPage') {
+          isTopicCollection = true;
+          if (json.name && typeof json.name === 'string') {
+            headline = json.name.trim();
+          }
+        }
+        if (type === 'NewsArticle') {
+          isNewsStory = true;
+          if (json.headline && typeof json.headline === 'string') {
+            headline = json.headline.trim();
+          }
+        }
+        if (type === 'Periodical' || type === 'Series') {
+          isNewsletter = true;
+          if (json.name && typeof json.name === 'string') {
+            headline = json.name.trim();
           }
         }
 
@@ -177,22 +272,27 @@ function parseLinkedInJsonLd(html: string): {
       } catch {}
     });
 
-    // Extract post images from HTML DOM (feedshare images)
-    $('img[data-delayed-url*="feedshare-image"], img[src*="feedshare-image"]').each((_, el) => {
-      const src = $(el).attr('data-delayed-url') || $(el).attr('src');
-      if (src && !isExcludedPostMedia(src)) {
-        rawImages.push(src);
-      }
-    });
+    // Extract post images strictly from the primary post container, ignoring related/recommended posts
+    const $mainPost = getMainPostElement($);
+    $mainPost
+      .find('img[data-delayed-url*="feedshare-"], img[src*="feedshare-"], img[data-src*="feedshare-"]')
+      .each((_, el) => {
+        const $img = $(el);
+        if (isInsideRelatedPosts($img)) return;
+        const src = $img.attr('data-delayed-url') || $img.attr('data-src') || $img.attr('src');
+        if (src && !isExcludedPostMedia(src)) {
+          rawImages.push(src);
+        }
+      });
 
     const ogImg = $('meta[property="og:image"]').attr('content') || $('meta[name="twitter:image"]').attr('content');
     if (ogImg && !isExcludedPostMedia(ogImg)) {
       rawImages.push(ogImg);
     }
 
-    // Author Avatar: extract strictly from post author containers, NEVER from commenters or global selectors
+    // Author Avatar: extract strictly from primary post author containers, NEVER from commenters or related posts
     if (!authorAvatar || isGhostAvatar(authorAvatar)) {
-      const lockup = $('[data-test-id="main-feed-activity-card__entity-lockup"], .feed-shared-actor, .update-components-actor');
+      const lockup = $mainPost.find('[data-test-id="main-feed-activity-card__entity-lockup"], .feed-shared-actor, .update-components-actor');
       if (lockup.length > 0) {
         const img = lockup.find('img').first();
         const url = img.attr('data-delayed-url') || img.attr('src');
@@ -202,7 +302,7 @@ function parseLinkedInJsonLd(html: string): {
       }
 
       if (!authorAvatar || isGhostAvatar(authorAvatar)) {
-        const authorCard = $('.public-post-author-card');
+        const authorCard = $mainPost.find('.public-post-author-card');
         if (authorCard.length > 0) {
           const entity = authorCard.find('img[src*="profile-displayphoto"], [data-delayed-url*="profile-displayphoto"], [role="img"]').first();
           const url = entity.attr('data-delayed-url') || entity.attr('src');
@@ -244,13 +344,158 @@ function parseLinkedInJsonLd(html: string): {
     comments,
     reposts,
     isArticleType,
+    isTopicCollection,
+    isNewsStory,
+    isNewsletter,
     headline,
   };
 }
 
+interface LinkedInDocResult {
+  slides: string[];
+  pdfUrl: string | null;
+  title: string | null;
+  pageCount: number | null;
+}
+
+async function extractLinkedInDocumentSlides(
+  $: cheerio.CheerioAPI,
+  $container?: cheerio.Cheerio<any>
+): Promise<LinkedInDocResult> {
+  const slides: string[] = [];
+  let pdfUrl: string | null = null;
+  let title: string | null = null;
+  let pageCount: number | null = null;
+
+  const $scope = $container && $container.length > 0 ? $container : getMainPostElement($);
+
+  // 1. Check iframe[data-native-document-config] or any element with data-native-document-config
+  const configAttr =
+    $scope.find('iframe[data-native-document-config]').attr('data-native-document-config') ||
+    $scope.find('*[data-native-document-config]').attr('data-native-document-config') ||
+    $('iframe[data-native-document-config]').attr('data-native-document-config') ||
+    $('*[data-native-document-config]').attr('data-native-document-config');
+
+  if (configAttr) {
+    try {
+      const config = JSON.parse(configAttr);
+      const doc = config.doc || {};
+      if (doc.title) title = doc.title;
+      if (doc.totalPageCount) {
+        pageCount = typeof doc.totalPageCount === 'number' ? doc.totalPageCount : parseInt(doc.totalPageCount, 10);
+      }
+
+      // Cover pages fallback
+      if (Array.isArray(doc.coverPages)) {
+        for (const cp of doc.coverPages) {
+          const src = cp?.config?.src || cp?.imageManifestUrl;
+          if (src && typeof src === 'string' && !slides.includes(src)) {
+            slides.push(src);
+          }
+        }
+      }
+
+      // If manifestUrl is present, fetch it for full resolution slides & pdfUrl
+      if (doc.manifestUrl) {
+        try {
+          const mRes = await axios.get(doc.manifestUrl, {
+            headers: { 'User-Agent': 'LinkedInBot/1.0 (sdk@linkedin.com)' },
+            timeout: 4000,
+          });
+          if (mRes.data) {
+            if (mRes.data.transcribedDocumentUrl) {
+              pdfUrl = mRes.data.transcribedDocumentUrl;
+            }
+            const resolutions: Array<{ width: number; height: number; imageManifestUrl: string }> =
+              mRes.data.perResolutions || [];
+            // Prefer 800px or 1280px width, else first resolution
+            const bestRes =
+              resolutions.find((r) => r.width >= 700 && r.width <= 1000) ||
+              resolutions.find((r) => r.width > 1000) ||
+              resolutions[resolutions.length - 1] ||
+              resolutions[0];
+
+            if (bestRes?.imageManifestUrl) {
+              const imgRes = await axios.get(bestRes.imageManifestUrl, {
+                headers: { 'User-Agent': 'LinkedInBot/1.0 (sdk@linkedin.com)' },
+                timeout: 4000,
+              });
+              if (Array.isArray(imgRes.data?.pages)) {
+                slides.length = 0; // Replace cover pages with full deck of pages
+                for (const pageUrl of imgRes.data.pages) {
+                  if (typeof pageUrl === 'string' && !slides.includes(pageUrl)) {
+                    slides.push(pageUrl);
+                  }
+                }
+              }
+            }
+          }
+        } catch {
+          // ignore manifest error
+        }
+      }
+    } catch {
+      // ignore json parse error
+    }
+  }
+
+  // 2. Fallback: Parse carousel slides directly from DOM (e.g. from container or user HTML)
+  $scope
+    .find(
+      '.carousel-slide img, .native-document-container img, li[data-ssplayer-slide-index] img, img[data-src*="feedshare-document"], img[src*="feedshare-document"]'
+    )
+    .each((_, el) => {
+      const $img = $(el);
+      if (isInsideRelatedPosts($img)) return;
+      const src = $img.attr('data-src') || $img.attr('src') || $img.attr('data-delayed-url');
+      if (src && !slides.includes(src)) {
+        slides.push(src);
+      }
+    });
+
+  // Check download button for PDF URL
+  const downloadLink =
+    $scope.find('a[href*="feedshare-document-pdf"], .ssplayer-virus-scan-container__download-button, a.ssplayer-topbar-action-download').attr('href') ||
+    $('a[href*="feedshare-document-pdf"], .ssplayer-virus-scan-container__download-button, a.ssplayer-topbar-action-download').attr('href');
+  if (downloadLink && !pdfUrl) {
+    pdfUrl = downloadLink;
+  }
+
+  // Check title in player
+  const topbarTitle =
+    $scope.find('.ssplayer-topbar-title-text').text().trim() ||
+    $('.ssplayer-topbar-title-text').text().trim();
+  if (topbarTitle && !title) {
+    title = topbarTitle;
+  }
+
+  // Check page count in player
+  if (!pageCount) {
+    const pageLengthText =
+      $scope.find('span[data-pagination-length], .ssplayer-pagination-length').text().trim() ||
+      $('span[data-pagination-length], .ssplayer-pagination-length').text().trim();
+    if (pageLengthText) {
+      const match = pageLengthText.match(/(\d+)/);
+      if (match) pageCount = parseInt(match[1], 10);
+    }
+    if (!pageCount) {
+      const previewPages =
+        $scope.find('.ssplayer-topbar-details').first().text().trim() ||
+        $('.ssplayer-topbar-details').first().text().trim();
+      const m = previewPages.match(/(\d+)\s*pages?/i);
+      if (m) pageCount = parseInt(m[1], 10);
+    }
+    if (!pageCount && slides.length > 0) {
+      pageCount = slides.length;
+    }
+  }
+
+  return { slides, pdfUrl, title, pageCount };
+}
+
 export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
   platformKey: 'linkedin',
-  async extract(targetUrl: string): Promise<ExtractionResult<LinkedInCardData>> {
+  async extract(targetUrl: string, html?: string): Promise<ExtractionResult<LinkedInCardData>> {
     let authorName: string | null = null;
     let authorAvatar: string | null = null;
     let description: string | null = null;
@@ -262,71 +507,128 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
     let comments = 0;
     let reposts = 0;
     const mediaList: MediaItem[] = [];
+    let documentInfo: {
+      title?: string | null;
+      page_count?: number | null;
+      pdf_url?: string | null;
+    } | null = null;
 
+    let isTopicCollection = isLinkedInTopicCollectionUrl(targetUrl);
+    let isNewsStory = isLinkedInNewsStoryUrl(targetUrl);
+    let isNewsletter = isLinkedInNewsletterUrl(targetUrl);
     let isArticle = isLinkedInArticleUrl(targetUrl);
+    let pageTitle: string | null = null;
     let articleTitle: string | null = null;
     let articleContent: string | null = null;
     let wordCount: number | null = null;
     let readingTimeMinutes: number | null = null;
 
+    let rawHtml = html || '';
+
     // -------------------------------------------------------------
     // Tier 1: Fast-Path Axios & Cheerio with LinkedInBot Headers (~250ms)
     // -------------------------------------------------------------
-    try {
-      const res = await axios.get(targetUrl, {
-        headers: {
-          'User-Agent': 'LinkedInBot/1.0 (sdk@linkedin.com)',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        },
-        maxRedirects: 5,
-        timeout: 4000,
-      });
+    if (!rawHtml) {
+      try {
+        const res = await axios.get(targetUrl, {
+          headers: {
+            'User-Agent': 'LinkedInBot/1.0 (sdk@linkedin.com)',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          },
+          maxRedirects: 5,
+          timeout: 4000,
+        });
 
-      if (res && res.data) {
-        const parsed = parseLinkedInJsonLd(res.data);
-        authorName = parsed.authorName;
-        authorAvatar = parsed.authorAvatar;
-        description = parsed.description;
-        snapshot = parsed.snapshot;
-        extractedImages = parsed.images;
-        videoUrl = parsed.videoUrl;
-        publishedAt = parsed.publishedAt;
-        reactions = parsed.reactions;
-        comments = parsed.comments;
-        reposts = parsed.reposts;
-
-        if (parsed.isArticleType) {
-          isArticle = true;
+        if (res && res.data) {
+          rawHtml = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
         }
+      } catch {
+        // Fallback to Playwright if Axios fails
+      }
+    }
 
-        const $ = cheerio.load(res.data);
-        const ogDesc = $('meta[property="og:description"]').attr('content') || $('meta[name="description"]').attr('content');
-        const ogImage = $('meta[property="og:image"]').attr('content') || $('meta[name="twitter:image"]').attr('content');
-        const ogTitle = $('meta[property="og:title"]').attr('content') || '';
+    if (rawHtml) {
+      const parsed = parseLinkedInJsonLd(rawHtml);
+      authorName = parsed.authorName;
+      authorAvatar = parsed.authorAvatar;
+      description = parsed.description;
+      snapshot = parsed.snapshot;
+      extractedImages = parsed.images;
+      videoUrl = parsed.videoUrl;
+      publishedAt = parsed.publishedAt;
+      reactions = parsed.reactions;
+      comments = parsed.comments;
+      reposts = parsed.reposts;
 
-        if (!description && ogDesc) description = ogDesc;
-        if (!snapshot && ogImage) snapshot = ogImage;
+      if (parsed.isTopicCollection) isTopicCollection = true;
+      if (parsed.isNewsStory && !isArticle) isNewsStory = true;
+      if (parsed.isNewsletter) isNewsletter = true;
+      if (parsed.isArticleType && !isNewsStory && !isTopicCollection) isArticle = true;
 
-        if (isArticle) {
-          const rawTitle = ogTitle || $('title').text() || parsed.headline || null;
-          if (rawTitle) {
-            articleTitle = rawTitle.replace(/\s*\|\s*LinkedIn.*$/i, '').trim();
-          }
-          const articleRes = extractArticleContent($);
-          articleContent = articleRes.content;
-          wordCount = articleRes.wordCount;
-          readingTimeMinutes = articleRes.readingTimeMinutes;
+      const $ = cheerio.load(rawHtml);
+
+      // Top priority: twitter tags first, followed by meta tags, followed by og tags
+      const twitterTitle = $('meta[name="twitter:title"]').attr('content');
+      const metaTitle = $('meta[name="title"]').attr('content') || $('title').text();
+      const ogTitle = $('meta[property="og:title"]').attr('content');
+      const rawTitle = twitterTitle || metaTitle || ogTitle || parsed.headline || null;
+      if (rawTitle) {
+        pageTitle = cleanLinkedInTitle(rawTitle);
+      }
+
+      const twitterDesc = $('meta[name="twitter:description"]').attr('content');
+      const metaDesc = $('meta[name="description"]').attr('content');
+      const ogDesc = $('meta[property="og:description"]').attr('content');
+      const metaSnippet = twitterDesc || metaDesc || ogDesc || null;
+      const rawDesc = (parsed.description && metaSnippet && parsed.description.length > metaSnippet.length)
+        ? parsed.description
+        : (metaSnippet || parsed.description || null);
+      if (rawDesc) {
+        description = rawDesc;
+      }
+
+      if (!isNewsStory && !isTopicCollection) {
+        const twitterImage = $('meta[name="twitter:image"]').attr('content');
+        const metaImage = $('meta[name="image"]').attr('content');
+        const ogImage = $('meta[property="og:image"]').attr('content');
+        const candidateImage = twitterImage || metaImage || ogImage || null;
+        if (!snapshot && candidateImage && !isExcludedPostMedia(candidateImage)) {
+          snapshot = candidateImage;
         }
+      }
 
-        if (!authorName) {
-          const match = ogTitle.match(/\|\s*([^|]+)$/);
-          if (match && match[1] && !match[1].toLowerCase().includes('linkedin')) {
-            authorName = match[1].trim();
+      if (isArticle) {
+        articleTitle = pageTitle;
+        const articleRes = extractArticleContent($);
+        articleContent = articleRes.content;
+        wordCount = articleRes.wordCount;
+        readingTimeMinutes = articleRes.readingTimeMinutes;
+      }
+
+      if (!authorName) {
+        const titleForAuthor = ogTitle || twitterTitle || metaTitle || '';
+        const match = titleForAuthor.match(/\|\s*([^|]+?)(?:\s+posted|\s+on LinkedIn|$)/i);
+        if (match && match[1] && !match[1].toLowerCase().includes('linkedin')) {
+          authorName = match[1].trim();
+        }
+      }
+
+      // Check for LinkedIn native document / PDF presentation
+      // Only do this for individual posts (not for collection/topic hubs that aggregate multiple posts)
+      if (!isTopicCollection && !isNewsStory) {
+        const docResult = await extractLinkedInDocumentSlides($);
+        if (docResult.slides.length > 0 || docResult.pdfUrl || docResult.title) {
+          documentInfo = {
+            title: docResult.title || null,
+            page_count: docResult.pageCount || (docResult.slides.length > 0 ? docResult.slides.length : null),
+            pdf_url: docResult.pdfUrl || null,
+          };
+          if (docResult.slides.length > 0) {
+            extractedImages = [...docResult.slides];
+            snapshot = docResult.slides[0];
           }
         }
       }
-    } catch {
-      // Fallback to Playwright if Axios fails
     }
 
     // -------------------------------------------------------------
@@ -335,16 +637,26 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
     if (!description && !snapshot && !authorName) {
       try {
         const pwResult = await playwrightEngine.scrape<any>(targetUrl, {
-          waitSelector: 'article, main, .feed-shared-update-v2',
+          waitSelector: 'article, main, .feed-shared-update-v2, .native-document-container',
           waitTimeout: 1500,
           userAgent: 'LinkedInBot/1.0 (sdk@linkedin.com)',
           customEvaluator: async (page) => {
             return await page.evaluate(() => {
               const domImages: string[] = [];
-              document.querySelectorAll<HTMLImageElement>('img[src*="feedshare-image"], img[data-delayed-url*="feedshare-image"]').forEach((img) => {
-                const src = img.getAttribute('data-delayed-url') || img.src;
-                if (src) domImages.push(src);
-              });
+              const mainContainer =
+                document.querySelector(
+                  'article:not(.related-posts__crosslink):not([class*="related-posts"]), .main-feed-activity-card:not(.related-posts__crosslink), .feed-shared-update-v2, article'
+                ) || document;
+
+              mainContainer
+                .querySelectorAll<HTMLImageElement>(
+                  'img[src*="feedshare-image"], img[data-delayed-url*="feedshare-image"], img[src*="feedshare-document"], img[data-src*="feedshare-document"]'
+                )
+                .forEach((img) => {
+                  if (img.closest('.related-posts, .related-posts__crosslink, [class*="related-posts"]')) return;
+                  const src = img.getAttribute('data-delayed-url') || img.getAttribute('data-src') || img.src;
+                  if (src) domImages.push(src);
+                });
               return {
                 html: document.documentElement.outerHTML,
                 title: document.title,
@@ -356,7 +668,11 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
 
         if (pwResult.customData?.html) {
           const parsed = parseLinkedInJsonLd(pwResult.customData.html);
-          if (parsed.isArticleType) isArticle = true;
+          if (parsed.isTopicCollection) isTopicCollection = true;
+          if (parsed.isNewsStory && !isArticle) isNewsStory = true;
+          if (parsed.isNewsletter) isNewsletter = true;
+          if (parsed.isArticleType && !isNewsStory && !isTopicCollection) isArticle = true;
+
           if (parsed.authorName) authorName = parsed.authorName;
           if (parsed.authorAvatar) authorAvatar = parsed.authorAvatar;
           if (parsed.description) description = parsed.description;
@@ -368,34 +684,97 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
           if (parsed.comments) comments = parsed.comments;
           if (parsed.reposts) reposts = parsed.reposts;
 
+          const $pw = cheerio.load(pwResult.customData.html);
+          const twitterTitle = $pw('meta[name="twitter:title"]').attr('content');
+          const metaTitle = $pw('meta[name="title"]').attr('content') || $pw('title').text();
+          const ogTitle = $pw('meta[property="og:title"]').attr('content');
+          const rawTitle = twitterTitle || metaTitle || ogTitle || parsed.headline || null;
+          if (rawTitle && !pageTitle) {
+            pageTitle = cleanLinkedInTitle(rawTitle);
+          }
+
+          const twitterDesc = $pw('meta[name="twitter:description"]').attr('content');
+          const metaDesc = $pw('meta[name="description"]').attr('content');
+          const ogDesc = $pw('meta[property="og:description"]').attr('content');
+          const metaSnippet = twitterDesc || metaDesc || ogDesc || null;
+          const rawDesc = (parsed.description && metaSnippet && parsed.description.length > metaSnippet.length)
+            ? parsed.description
+            : (metaSnippet || parsed.description || null);
+          if (rawDesc && !description) {
+            description = rawDesc;
+          }
+
           if (isArticle && !articleContent) {
-            const $pw = cheerio.load(pwResult.customData.html);
-            const rawTitle = $pw('meta[property="og:title"]').attr('content') || $pw('title').text() || parsed.headline || null;
-            if (rawTitle && !articleTitle) {
-              articleTitle = rawTitle.replace(/\s*\|\s*LinkedIn.*$/i, '').trim();
-            }
+            if (!articleTitle) articleTitle = pageTitle;
             const articleRes = extractArticleContent($pw);
             articleContent = articleRes.content;
             wordCount = articleRes.wordCount;
             readingTimeMinutes = articleRes.readingTimeMinutes;
           }
+
+          if (!documentInfo && !isTopicCollection && !isNewsStory) {
+            const docResult = await extractLinkedInDocumentSlides($pw);
+            if (docResult.slides.length > 0 || docResult.pdfUrl || docResult.title) {
+              documentInfo = {
+                title: docResult.title || null,
+                page_count: docResult.pageCount || (docResult.slides.length > 0 ? docResult.slides.length : null),
+                pdf_url: docResult.pdfUrl || null,
+              };
+              if (docResult.slides.length > 0) {
+                extractedImages = [...docResult.slides];
+                snapshot = docResult.slides[0];
+              }
+            }
+          }
         }
 
-        if (Array.isArray(pwResult.customData?.images) && extractedImages.length === 0) {
+        if (Array.isArray(pwResult.customData?.images) && extractedImages.length === 0 && !isNewsStory && !isTopicCollection) {
           extractedImages = pwResult.customData.images;
         }
 
         if (!description) description = pwResult.description || null;
-        if (!snapshot) snapshot = pwResult.snapshot || null;
+        if (!snapshot && !isNewsStory && !isTopicCollection) snapshot = pwResult.snapshot || null;
         if (!authorName) authorName = pwResult.author || null;
       } catch {
         // Ignore playwright fallback error
       }
     }
 
+    // Resolve specific type and site name
+    let resolvedType = 'linkedin';
+    let resolvedSiteName = 'LinkedIn';
+
+    if (isTopicCollection) {
+      resolvedType = 'linkedin_topic_collection';
+      resolvedSiteName = 'LinkedIn Top Content';
+    } else if (isNewsStory) {
+      resolvedType = 'linkedin_news_story';
+      resolvedSiteName = 'LinkedIn News';
+    } else if (isNewsletter) {
+      resolvedType = 'linkedin_newsletter';
+      resolvedSiteName = 'LinkedIn Newsletter';
+    } else if (isArticle) {
+      resolvedType = 'linkedin_article';
+      resolvedSiteName = 'LinkedIn Article';
+    } else {
+      resolvedType = 'linkedin_post';
+      resolvedSiteName = 'LinkedIn';
+    }
+
     // Resolve author name fallback
     if (!authorName || authorName === 'LinkedIn User' || authorName.toLowerCase().includes('linkedin')) {
-      authorName = extractNameFromUrlSlug(targetUrl) || (isArticle ? 'LinkedIn Author' : 'LinkedIn Member');
+      if (isTopicCollection) {
+        authorName = 'LinkedIn Top Content';
+        authorAvatar = LINKEDIN_LOGO_URL;
+      } else if (isNewsStory) {
+        authorName = 'LinkedIn News';
+        authorAvatar = LINKEDIN_LOGO_URL;
+      } else if (isNewsletter) {
+        authorName = 'LinkedIn Newsletter';
+        authorAvatar = LINKEDIN_LOGO_URL;
+      } else {
+        authorName = extractNameFromUrlSlug(targetUrl) || (isArticle ? 'LinkedIn Author' : 'LinkedIn Member');
+      }
     }
 
     // Fallback avatar if still not found
@@ -404,6 +783,13 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
     }
 
     // Assemble clean media list (Strictly post/article media: video or snapshot, NO profile avatars or banners)
+    // User requirement: DO NOT scrape any images for news and topic_collection
+    if (isNewsStory || isTopicCollection) {
+      extractedImages = [];
+      snapshot = null;
+      videoUrl = null;
+    }
+
     if (videoUrl) {
       mediaList.push({ type: 'video', url: videoUrl });
     }
@@ -416,18 +802,43 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
       mediaList.push({ type: 'image', url: snapshot });
     }
 
-    const primarySnapshot = (mediaList.find((m) => m.type === 'image')?.url || mediaList[0]?.url || snapshot) || null;
+    if (isNewsStory || isTopicCollection) {
+      mediaList.length = 0;
+    }
 
-    const finalDescription = description ? cleanLinkedInText(cleanDescription(description)) : '';
+    const primarySnapshot = (!isNewsStory && !isTopicCollection)
+      ? ((mediaList.find((m) => m.type === 'image')?.url || mediaList[0]?.url || snapshot) || null)
+      : null;
 
-    const hasVideo = Boolean(videoUrl || mediaList.some((m) => m.type === 'video'));
+    let resolvedDesc = description;
+    if (!isArticle && !isTopicCollection && !isNewsStory && pageTitle) {
+      if (!resolvedDesc || pageTitle.length > resolvedDesc.length) {
+        resolvedDesc = pageTitle;
+      }
+    }
+    const finalDescription = resolvedDesc ? cleanLinkedInText(cleanDescription(resolvedDesc)) : '';
+
+    const hasVideo = Boolean(!isNewsStory && !isTopicCollection && (videoUrl || mediaList.some((m) => m.type === 'video')));
     const videoThumbnail = hasVideo ? (primarySnapshot || snapshot || null) : null;
 
+    let finalTitle: string | null = null;
+    if (isArticle) {
+      finalTitle = articleTitle ? cleanTitle(articleTitle) : (pageTitle ? cleanTitle(pageTitle) : null);
+    } else if (documentInfo?.title) {
+      finalTitle = cleanTitle(documentInfo.title);
+    } else if (isNewsStory || isTopicCollection || isNewsletter) {
+      finalTitle = pageTitle ? cleanTitle(pageTitle) : null;
+    } else {
+      // Regular LinkedIn posts do not have titles. Use clean attribution so the post body is not stored as title.
+      finalTitle = authorName ? `${authorName} on LinkedIn` : 'LinkedIn Post';
+    }
+
     return {
-      title: isArticle ? (articleTitle ? cleanTitle(articleTitle) : null) : null,
+      title: finalTitle,
       description: finalDescription,
       logo: LINKEDIN_LOGO_URL,
-      ogSiteName: isArticle ? 'LinkedIn Article' : 'LinkedIn',
+      ogSiteName: resolvedSiteName,
+      type: resolvedType,
       card_data: {
         author: {
           name: authorName,
@@ -441,6 +852,9 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
         media: mediaList,
         posted_at: publishedAt || new Date().toISOString(),
         video_thumbnail: videoThumbnail,
+        type: resolvedType,
+        page_intent: resolvedType,
+        ...(documentInfo ? { document: documentInfo } : {}),
         ...(isArticle
           ? {
               type: 'article',
