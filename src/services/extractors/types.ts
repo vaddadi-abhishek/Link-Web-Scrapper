@@ -71,6 +71,11 @@ export interface LinkedInCardData {
   word_count?: number | null;
   reading_time_minutes?: number | null;
   video_thumbnail?: string | null;
+  document?: {
+    title?: string | null;
+    page_count?: number | null;
+    pdf_url?: string | null;
+  } | null;
 }
 
 export interface RedditCardData {
@@ -130,12 +135,23 @@ export interface GlobalWebCardData {
   reading_time_minutes?: number | null;
 }
 
+export interface ArticleData {
+  content_html: string;
+  content_text: string;
+  byline?: string | null;
+  excerpt?: string | null;
+  word_count: number;
+  reading_time_minutes: number;
+}
+
 export interface ExtractionResult<T = any> {
   title: string | null;
   description: string | null;
   logo: string | null;
   ogSiteName: string | null;
+  type?: string | null;
   card_data: T;
+  article?: ArticleData | null;
 }
 
 export interface PlatformExtractor<T = any> {
