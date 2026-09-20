@@ -275,11 +275,32 @@ function parseLinkedInJsonLd(html: string): {
     // Extract post images strictly from the primary post container, ignoring related/recommended posts
     const $mainPost = getMainPostElement($);
     $mainPost
-      .find('img[data-delayed-url*="feedshare-"], img[src*="feedshare-"], img[data-src*="feedshare-"]')
+      .find(
+        'img[data-delayed-url*="feedshare-"], img[src*="feedshare-"], img[data-src*="feedshare-"], ' +
+        'img[srcset*="image-shrink_"], img[src*="image-shrink_"], img[data-delayed-url*="image-shrink_"], ' +
+        'img[srcset*="/dms/image/"], img[src*="/dms/image/"], img[data-delayed-url*="/dms/image/"], ' +
+        'img[alt="View image"], figure img, div[style*="aspect-ratio"] img, [style*="aspect-ratio"] img'
+      )
       .each((_, el) => {
         const $img = $(el);
         if (isInsideRelatedPosts($img)) return;
-        const src = $img.attr('data-delayed-url') || $img.attr('data-src') || $img.attr('src');
+        const srcset = $img.attr('srcset');
+        let src = $img.attr('data-delayed-url') || $img.attr('data-src') || $img.attr('src');
+        if (srcset) {
+          const parts = srcset.split(',').map((s) => s.trim().split(/\s+/)).filter((p) => p[0]);
+          const partsWithWidth = parts.map((p) => {
+            const wMatch = p[1] ? p[1].match(/^(\d+)w$/) : null;
+            return { url: p[0], width: wMatch ? parseInt(wMatch[1], 10) : 0 };
+          });
+          const hasWidths = partsWithWidth.some((p) => p.width > 0);
+          if (hasWidths) {
+            partsWithWidth.sort((a, b) => b.width - a.width);
+            src = partsWithWidth[0].url.replace(/&amp;/g, '&');
+          } else if (parts.length > 0) {
+            const highRes = parts.find((p) => p[0].includes('shrink_1280') || p[0].includes('shrink_800') || p[0].includes('high-res'));
+            src = (highRes ? highRes[0] : parts[parts.length - 1][0]).replace(/&amp;/g, '&');
+          }
+        }
         if (src && !isExcludedPostMedia(src)) {
           rawImages.push(src);
         }
@@ -320,8 +341,9 @@ function parseLinkedInJsonLd(html: string): {
   for (const img of rawImages) {
     if (!img || isExcludedPostMedia(img)) continue;
     const cleanUrl = img.replace(/&amp;/g, '&').trim();
+    const dmsMatch = cleanUrl.match(/\/dms\/(?:image|document)\/(?:v2\/)?([^/?#]+)/i);
     const idMatch = cleanUrl.match(/\/feedshare-image[^\/]*\/([^\/?]+)/);
-    const key = idMatch ? idMatch[1] : cleanUrl.split('?')[0];
+    const key = dmsMatch ? dmsMatch[1] : (idMatch ? idMatch[1] : cleanUrl.split('?')[0]);
     if (!seenKeys.has(key)) {
       seenKeys.add(key);
       images.push(cleanUrl);
@@ -650,11 +672,21 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
 
               mainContainer
                 .querySelectorAll<HTMLImageElement>(
-                  'img[src*="feedshare-image"], img[data-delayed-url*="feedshare-image"], img[src*="feedshare-document"], img[data-src*="feedshare-document"]'
+                  'img[src*="feedshare-image"], img[data-delayed-url*="feedshare-image"], ' +
+                  'img[src*="image-shrink_"], img[srcset*="image-shrink_"], img[data-delayed-url*="image-shrink_"], ' +
+                  'img[src*="/dms/image/"], img[srcset*="/dms/image/"], img[data-delayed-url*="/dms/image/"], ' +
+                  'img[src*="feedshare-document"], img[data-src*="feedshare-document"], ' +
+                  'img[alt="View image"], figure img, div[style*="aspect-ratio"] img'
                 )
                 .forEach((img) => {
                   if (img.closest('.related-posts, .related-posts__crosslink, [class*="related-posts"]')) return;
-                  const src = img.getAttribute('data-delayed-url') || img.getAttribute('data-src') || img.src;
+                  const srcset = img.getAttribute('srcset');
+                  let src = img.getAttribute('data-delayed-url') || img.getAttribute('data-src') || img.src;
+                  if (srcset) {
+                    const parts = srcset.split(',').map((s) => s.trim().split(/\s+/)).filter((p) => p[0]);
+                    const highRes = parts.find((p) => p[0].includes('shrink_1280') || p[0].includes('shrink_800') || p[0].includes('high-res'));
+                    src = highRes ? highRes[0] : (parts.length > 0 ? parts[parts.length - 1][0] : src);
+                  }
                   if (src) domImages.push(src);
                 });
               return {
