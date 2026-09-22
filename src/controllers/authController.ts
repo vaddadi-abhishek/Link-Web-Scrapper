@@ -4,6 +4,7 @@ import { logger } from '../utils/logger';
 import { AuthenticatedRequest } from '../middleware/authMiddleware';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/;
 
 /**
  * POST /api/v1/auth/signup
@@ -24,8 +25,10 @@ export async function signupController(req: Request, res: Response): Promise<voi
       return;
     }
 
-    if (password.length < 8) {
-      res.status(400).json({ error: 'Password must be at least 8 characters long.' });
+    if (!PASSWORD_REGEX.test(password)) {
+      res.status(400).json({
+        error: 'Password must be at least 8 characters long and contain at least one uppercase letter, one lowercase letter, and one number.',
+      });
       return;
     }
 
@@ -43,8 +46,8 @@ export async function signupController(req: Request, res: Response): Promise<voi
 
     if (error) {
       logger.warn('AuthController', 'Sign up error:', error.message);
-      // Return user-friendly error message
-      res.status(400).json({ error: error.message || 'Unable to create account.' });
+      // Return user-friendly error message to prevent user enumeration
+      res.status(400).json({ error: 'Unable to create account. Please check your details and try again.' });
       return;
     }
 

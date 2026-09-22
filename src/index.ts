@@ -24,6 +24,12 @@ app.use(
   helmet({
     crossOriginResourcePolicy: { policy: 'cross-origin' }, // Allows image proxy to stream across origins
     crossOriginEmbedderPolicy: false,
+    hsts: {
+      maxAge: 63072000, // 2 years
+      includeSubDomains: true,
+      preload: true,
+    },
+    referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
   })
 );
 
@@ -54,8 +60,9 @@ app.use(
         /^http:\/\/192\.168\.\d+\.\d+(:\d+)?$/.test(origin) ||
         /^http:\/\/localhost(:\d+)?$/.test(origin) ||
         /^http:\/\/127\.0\.0\.1(:\d+)?$/.test(origin) ||
-        origin.endsWith('.vercel.app') ||
-        origin.endsWith('.onrender.com');
+        origin === 'https://mindspace.vercel.app' ||
+        /^https:\/\/mindspace(-[a-z0-9-]+)?\.vercel\.app$/.test(origin) ||
+        origin === 'https://mindspace-node-backend.onrender.com';
 
       if (isAllowed) {
         callback(null, true);

@@ -141,6 +141,6 @@ export const extractMetadataController = async (req: Request, res: Response): Pr
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     logger.error('ExtractController', 'Extraction error:', message);
-    res.status(500).json({ error: message || 'Failed to extract metadata' });
+    res.status(500).json({ error: 'Failed to extract metadata. Please try again later.' });
   }
 };
