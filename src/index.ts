@@ -1,5 +1,6 @@
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import dotenv from 'dotenv';
 import extractRouter from './routes/extract';
 import proxyRouter from './routes/proxy';
@@ -8,6 +9,7 @@ import authRouter from './routes/auth';
 import { initializeHttpClient } from './utils/httpClient';
 import { logger } from './utils/logger';
 import { playwrightEngine } from './services/playwrightEngine';
+import { apiRateLimiter } from './middleware/rateLimiter';
 
 dotenv.config();
 
@@ -17,17 +19,57 @@ initializeHttpClient();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Security & Performance
-app.disable('x-powered-by');
-
-// Middleware - Allow CORS with custom headers including X-Auto-AI-Context
+// Security: Helmet HTTP Headers
 app.use(
-  cors({
-    origin: true,
-    credentials: true,
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Auto-AI-Context', 'Prefer'],
+  helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' }, // Allows image proxy to stream across origins
+    crossOriginEmbedderPolicy: false,
   })
 );
+
+app.disable('x-powered-by');
+
+// Allowed Origins Whitelist
+const allowedOrigins = [
+  process.env.FRONTEND_URL,
+  process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : [],
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+]
+  .flat()
+  .filter(Boolean)
+  .map((o) => (o as string).trim());
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Allow requests with no origin (like mobile apps, curl, server-to-server)
+      if (!origin) return callback(null, true);
+
+      // Check if origin matches allowed list or local LAN
+      const isAllowed =
+        allowedOrigins.includes(origin) ||
+        /^http:\/\/192\.168\.\d+\.\d+(:\d+)?$/.test(origin) ||
+        /^http:\/\/localhost(:\d+)?$/.test(origin) ||
+        /^http:\/\/127\.0\.0\.1(:\d+)?$/.test(origin) ||
+        origin.endsWith('.vercel.app') ||
+        origin.endsWith('.onrender.com');
+
+      if (isAllowed) {
+        callback(null, true);
+      } else {
+        logger.warn('CORS', `Blocked request from untrusted origin: ${origin}`);
+        callback(new Error('Not allowed by CORS'));
+      }
+    },
+    credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Auto-AI-Context', 'Prefer'],
+    methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+  })
+);
+
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -35,6 +77,9 @@ app.use(express.urlencoded({ extended: true }));
 app.get('/health', (_req: Request, res: Response) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
+
+// Apply general API rate limiter to all /api/v1 routes
+app.use('/api/v1', apiRateLimiter);
 
 // API Routes
 app.use('/api/v1/auth', authRouter);
@@ -47,7 +92,7 @@ app.use((_req: Request, res: Response) => {
   res.status(404).json({ error: 'Endpoint not found' });
 });
 
-// Centralized JSON Error Handler Middleware
+// Centralized JSON Error Handler Middleware (Enforcing Generic Client-Side Error Messages)
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   const message = err instanceof Error ? err.message : String(err);
   const status =
@@ -55,9 +100,17 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
       ? (err as { status: number }).status
       : 500;
 
-  logger.error('App', 'Unhandled server error:', message);
+  // Always log the full technical error details internally
+  logger.error('App', `Server error [${status}]:`, message);
+
+  // Security standard: Never leak internal stack traces or database errors to the client on 500s
+  const clientResponse =
+    status >= 500
+      ? 'An unexpected error occurred. Please try again later.'
+      : message || 'Request failed';
+
   res.status(status).json({
-    error: message || 'Internal server error',
+    error: clientResponse,
   });
 });
 
