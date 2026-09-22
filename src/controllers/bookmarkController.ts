@@ -176,7 +176,7 @@ export async function getBookmarksController(req: AuthenticatedRequest, res: Res
 
     if (error) {
       logger.error('BookmarkController', `Failed to fetch bookmarks for ${userId}:`, error.message);
-      res.status(500).json({ error: error.message });
+      res.status(500).json({ error: 'Failed to retrieve bookmarks.' });
       return;
     }
 
@@ -432,7 +432,7 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
 
     if (bmError || !bookmarkRow) {
       logger.error('BookmarkController', 'Failed to insert bookmark into Supabase:', bmError?.message);
-      res.status(500).json({ error: bmError?.message || 'Failed to save bookmark.' });
+      res.status(500).json({ error: 'Failed to save bookmark.' });
       return;
     }
 
@@ -507,7 +507,7 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error('BookmarkController', 'Error creating bookmark:', message);
-    res.status(500).json({ error: message || 'Internal server error while creating bookmark.' });
+    res.status(500).json({ error: 'Internal server error while creating bookmark.' });
   }
 }
 
@@ -694,7 +694,8 @@ export async function deleteBookmarkController(req: AuthenticatedRequest, res: R
       .eq('user_id', userId);
 
     if (error) {
-      res.status(500).json({ error: error.message });
+      logger.error('BookmarkController', 'Failed to delete bookmark from Supabase:', error.message);
+      res.status(500).json({ error: 'Failed to delete bookmark.' });
       return;
     }
 
@@ -759,7 +760,8 @@ export async function updateUserSettingsController(req: AuthenticatedRequest, re
       .single();
 
     if (error) {
-      res.status(500).json({ error: error.message });
+      logger.error('BookmarkController', 'Failed to update user settings in Supabase:', error.message);
+      res.status(500).json({ error: 'Failed to update user settings.' });
       return;
     }
 
@@ -795,7 +797,7 @@ export async function getBookmarkArticleController(req: AuthenticatedRequest, re
 
     if (error) {
       logger.error('BookmarkController', `Failed to fetch article for bookmark ${bookmarkId}:`, error.message);
-      res.status(500).json({ error: error.message });
+      res.status(500).json({ error: 'Failed to retrieve article content.' });
       return;
     }
 

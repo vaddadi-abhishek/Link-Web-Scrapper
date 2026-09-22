@@ -93,7 +93,7 @@ export const avatarCache = new MemoryCache<string>(7200, 500);
 export const aiCache = new MemoryCache<any>(3600, 500);
 
 /**
- * DNS Resolution Cache: Caches validated clean hostnames for SSRF checks.
+ * DNS Resolution Cache: Caches resolved IP strings for SSRF checks to enable re-validation.
  * TTL: 5 minutes (300s), Max: 500 entries.
  */
-export const dnsCache = new MemoryCache<boolean>(300, 500);
+export const dnsCache = new MemoryCache<string>(300, 500);

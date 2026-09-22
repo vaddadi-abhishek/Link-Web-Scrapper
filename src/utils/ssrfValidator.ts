@@ -14,15 +14,14 @@ export const validateUrlAgainstSSRF = async (urlString: string): Promise<boolean
     const parsed = new URL(urlString);
     const hostname = parsed.hostname.toLowerCase();
 
-    // Check cached resolution first
-    const cachedResult = dnsCache.get(hostname);
-    if (cachedResult !== undefined) {
-      return cachedResult;
+    // Check cached resolution first and re-verify against private IP rules
+    const cachedIp = dnsCache.get(hostname);
+    if (cachedIp !== undefined) {
+      return !isPrivateIP(cachedIp);
     }
 
     // Block obvious internal hosts early
     if (hostname === 'localhost' || hostname.endsWith('.local') || hostname.endsWith('.internal')) {
-      dnsCache.set(hostname, false);
       return false;
     }
     
@@ -36,11 +35,10 @@ export const validateUrlAgainstSSRF = async (urlString: string): Promise<boolean
 
     // Check if the resolved IP is an internal/private address
     if (isPrivateIP(address)) {
-      dnsCache.set(hostname, false);
       return false;
     }
 
-    dnsCache.set(hostname, true);
+    dnsCache.set(hostname, address);
     return true;
   } catch {
     // If URL is invalid or DNS resolution fails, block the request
@@ -51,7 +49,7 @@ export const validateUrlAgainstSSRF = async (urlString: string): Promise<boolean
 /**
  * Checks if an IP address belongs to a private/internal network
  */
-const isPrivateIP = (ip: string): boolean => {
+export const isPrivateIP = (ip: string): boolean => {
   // Handle IPv4-mapped IPv6 addresses
   if (ip.startsWith('::ffff:')) {
     ip = ip.replace('::ffff:', '');

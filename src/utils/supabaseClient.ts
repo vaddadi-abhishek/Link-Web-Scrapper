@@ -13,7 +13,7 @@ if (!supabaseUrl || !supabaseAnonKey) {
 }
 
 if (!supabaseServiceRoleKey) {
-  logger.warn(
+  logger.error(
     'Supabase',
     'SUPABASE_SERVICE_ROLE_KEY is not defined. Elevated cross-user cache lookups and administrative operations will be restricted by RLS.'
   );

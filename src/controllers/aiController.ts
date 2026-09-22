@@ -16,6 +16,6 @@ export const aiAnalyzeController = async (req: Request, res: Response): Promise<
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     logger.error('AIController', 'AI analysis failed:', message);
-    res.status(500).json({ error: message || 'Failed to perform AI visual analysis.' });
+    res.status(500).json({ error: 'Failed to perform AI visual analysis. Please try again later.' });
   }
 };

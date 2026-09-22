@@ -2,6 +2,7 @@ import { chromium, Browser } from 'playwright';
 import { resolveUrl } from '../utils/urlFormatter';
 import { cleanTitle, cleanDescription } from '../utils/textCleaner';
 import { logger } from '../utils/logger';
+import { isPrivateIP } from '../utils/ssrfValidator';
 
 export interface PlaywrightExtractionResult<T = any> {
   title: string | null;
@@ -139,7 +140,26 @@ class PlaywrightEngine {
           return route.abort().catch(() => {});
         }
 
-        const reqUrl = route.request().url().toLowerCase();
+        const rawUrl = route.request().url();
+        try {
+          const parsed = new URL(rawUrl);
+          if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+            return route.abort().catch(() => {});
+          }
+          const host = parsed.hostname.toLowerCase();
+          if (
+            host === 'localhost' ||
+            host.endsWith('.local') ||
+            host.endsWith('.internal') ||
+            isPrivateIP(host)
+          ) {
+            return route.abort().catch(() => {});
+          }
+        } catch {
+          return route.abort().catch(() => {});
+        }
+
+        const reqUrl = rawUrl.toLowerCase();
         for (const pattern of BLOCKED_TRACKER_PATTERNS) {
           if (reqUrl.includes(pattern)) {
             return route.abort().catch(() => {});
