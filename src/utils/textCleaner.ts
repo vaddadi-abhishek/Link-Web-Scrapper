@@ -139,3 +139,56 @@ export function cleanDescription(rawDescription: string | null | undefined): str
   return desc.trim() || null;
 }
 
+/**
+ * Detects if extracted title, description, or HTML content is an Access Denied / WAF / Cloudflare block or bot challenge page.
+ */
+export function isAccessDeniedOrChallenge(
+  title?: string | null,
+  description?: string | null,
+  htmlOrBody?: string | null
+): boolean {
+  const cleanT = (title || '').trim().toLowerCase();
+  const cleanD = (description || '').trim().toLowerCase();
+  const cleanH = (htmlOrBody || '').substring(0, 3000).toLowerCase();
+
+  const exactBlockedTitles = [
+    'access denied',
+    'access to this page has been denied',
+    '403 forbidden',
+    '403 - forbidden',
+    'forbidden',
+    'just a moment...',
+    'attention required! | cloudflare',
+    'security check',
+    'robot or human?',
+    'bot verification',
+    'please verify you are a human',
+    'are you a human?',
+    'human verification',
+    'blocked',
+    'request rejected',
+    'ddos-guard',
+  ];
+
+  if (exactBlockedTitles.includes(cleanT)) {
+    return true;
+  }
+
+  const combined = `${cleanT} ${cleanD} ${cleanH}`;
+  if (
+    /reference\s*#[0-9a-f.]+/i.test(combined) ||
+    combined.includes('errors.edgesuite.net') ||
+    combined.includes("you don't have permission to access") ||
+    combined.includes('access to this page has been denied') ||
+    combined.includes('our systems have detected unusual traffic') ||
+    combined.includes('cf-browser-verification') ||
+    combined.includes('cloudflare ray id') ||
+    combined.includes('incapsula incident id')
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+

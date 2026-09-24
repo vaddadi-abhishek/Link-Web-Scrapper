@@ -1,7 +1,7 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { resolveUrl } from '../utils/urlFormatter';
-import { cleanTitle, cleanDescription } from '../utils/textCleaner';
+import { cleanTitle, cleanDescription, isAccessDeniedOrChallenge } from '../utils/textCleaner';
 import { sharedHttpAgent, sharedHttpsAgent } from '../utils/httpClient';
 import { logger } from '../utils/logger';
 
@@ -328,6 +328,34 @@ export function extractArticleContent($: cheerio.CheerioAPI): ArticleExtractionR
   }
 }
 
+const DESKTOP_CHROME_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+const TWITTERBOT_UA = 'Twitterbot/1.0 (https://dev.twitter.com/cards/overview)';
+const FACEBOOK_UA = 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)';
+const WHATSAPP_UA = 'WhatsApp/2.21.12.21 A';
+
+function buildScraperHeaders(ua: string): Record<string, string> {
+  const isDesktop = ua.includes('Chrome');
+  return {
+    'User-Agent': ua,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br',
+    ...(isDesktop
+      ? {
+          'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+          'Sec-Ch-Ua-Mobile': '?0',
+          'Sec-Ch-Ua-Platform': '"Windows"',
+          'Sec-Fetch-Dest': 'document',
+          'Sec-Fetch-Mode': 'navigate',
+          'Sec-Fetch-Site': 'none',
+          'Sec-Fetch-User': '?1',
+          'Upgrade-Insecure-Requests': '1',
+        }
+      : {}),
+  };
+}
+
 /**
  * Fast-path scraper using Axios & Cheerio with Connection Reuse.
  * Timeout: 4000ms.
@@ -337,27 +365,64 @@ export async function scrapeWithCheerio(targetUrl: string): Promise<CheerioExtra
     const lowerUrl = targetUrl.toLowerCase();
     const isTwitterOrX = lowerUrl.includes('x.com') || lowerUrl.includes('twitter.com');
     const isReddit = lowerUrl.includes('reddit.com');
-    const userAgent = isTwitterOrX || isReddit
-      ? 'Twitterbot/1.0 (https://dev.twitter.com/cards/overview)'
-      : 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)';
+    const isFacebookOrMeta =
+      lowerUrl.includes('facebook.com') ||
+      lowerUrl.includes('instagram.com') ||
+      lowerUrl.includes('fb.watch') ||
+      lowerUrl.includes('fb.me');
 
-    const response = await axios.get(targetUrl, {
-      timeout: 4000,
-      maxContentLength: 5 * 1024 * 1024,
-      httpAgent: sharedHttpAgent,
-      httpsAgent: sharedHttpsAgent,
-      headers: {
-        'User-Agent': userAgent,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Accept-Encoding': 'gzip, deflate, br',
-      },
-      maxRedirects: 5,
-      validateStatus: (status) => status >= 200 && status < 400,
-    });
+    const primaryUa = (isTwitterOrX || isReddit)
+      ? TWITTERBOT_UA
+      : isFacebookOrMeta
+      ? FACEBOOK_UA
+      : DESKTOP_CHROME_UA;
 
-    const html = response.data;
-    if (typeof html !== 'string') {
+    const fallbackUa = (isTwitterOrX || isReddit || isFacebookOrMeta)
+      ? DESKTOP_CHROME_UA
+      : WHATSAPP_UA;
+
+    let html: string | null = null;
+
+    try {
+      const response = await axios.get(targetUrl, {
+        timeout: 4000,
+        maxContentLength: 5 * 1024 * 1024,
+        httpAgent: sharedHttpAgent,
+        httpsAgent: sharedHttpsAgent,
+        headers: buildScraperHeaders(primaryUa),
+        maxRedirects: 5,
+        validateStatus: (status) => status >= 200 && status < 400,
+      });
+
+      if (typeof response.data === 'string') {
+        html = response.data;
+      }
+    } catch (err: unknown) {
+      logger.debug('CheerioScraper', `Primary UA failed for ${targetUrl}:`, err instanceof Error ? err.message : String(err));
+    }
+
+    // Resilient fallback: If primary UA was blocked (4xx/5xx or HTML challenge page), retry with fallback UA
+    if (!html || isAccessDeniedOrChallenge(null, null, html)) {
+      try {
+        const fallbackRes = await axios.get(targetUrl, {
+          timeout: 4000,
+          maxContentLength: 5 * 1024 * 1024,
+          httpAgent: sharedHttpAgent,
+          httpsAgent: sharedHttpsAgent,
+          headers: buildScraperHeaders(fallbackUa),
+          maxRedirects: 5,
+          validateStatus: (status) => status >= 200 && status < 400,
+        });
+
+        if (typeof fallbackRes.data === 'string' && !isAccessDeniedOrChallenge(null, null, fallbackRes.data)) {
+          html = fallbackRes.data;
+        }
+      } catch (fallbackErr: unknown) {
+        logger.debug('CheerioScraper', `Fallback UA failed for ${targetUrl}:`, fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr));
+      }
+    }
+
+    if (!html) {
       return null;
     }
 
@@ -409,6 +474,12 @@ export async function scrapeWithCheerio(targetUrl: string): Promise<CheerioExtra
     ) {
       title = null;
       description = null;
+    }
+
+    // Filter Access Denied / Bot Challenge / WAF error metadata
+    if (isAccessDeniedOrChallenge(title, description, html)) {
+      logger.warn('CheerioScraper', `Access denied or bot challenge detected for ${targetUrl}`);
+      return null;
     }
 
     // 3. Direct Image resolution order prioritizing og:image and twitter:image

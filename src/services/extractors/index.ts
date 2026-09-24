@@ -9,6 +9,7 @@ import { pinterestExtractor } from './pinterest';
 import { globalWebExtractor } from './globalWeb';
 import { extractionCache } from '../../utils/cache';
 import { canonicalizeUrl, isResolvableShortlink, resolveShortlink } from '../../utils/urlFormatter';
+import { isAccessDeniedOrChallenge } from '../../utils/textCleaner';
 import { logger } from '../../utils/logger';
 
 export * from './types';
@@ -85,7 +86,8 @@ export async function dispatchExtraction(
   };
 
   // Cache successful extractions (30-minute default TTL)
-  if (!bypassCache && (result.title || result.description || result.card_data)) {
+  const isBlocked = isAccessDeniedOrChallenge(result.title, result.description);
+  if (!bypassCache && !isBlocked && (result.title || result.description || result.card_data)) {
     extractionCache.set(cacheKey, response);
   }
 

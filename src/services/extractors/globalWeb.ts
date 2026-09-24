@@ -3,6 +3,7 @@ import * as cheerio from 'cheerio';
 import { scrapeWithCheerio, extractArticleContent, detectPageIntent } from '../cheerioScraper';
 import { playwrightEngine } from '../playwrightEngine';
 import { resolveUrl } from '../../utils/urlFormatter';
+import { isAccessDeniedOrChallenge } from '../../utils/textCleaner';
 import { extractArticleWithReadability } from '../readabilityService';
 
 function fallbackTitle(urlStr: string): string {
@@ -42,9 +43,12 @@ export const globalWebExtractor: PlatformExtractor<GlobalWebCardData> = {
   async extract(targetUrl: string): Promise<ExtractionResult<GlobalWebCardData>> {
     // 1. Cheerio Fast-Path: Ultra-fast (~150-300ms) metadata extraction
     const cheerioData = await scrapeWithCheerio(targetUrl);
+    const isCheerioBlocked = cheerioData
+      ? isAccessDeniedOrChallenge(cheerioData.title, cheerioData.description, cheerioData.rawHtml)
+      : false;
 
-    // If Cheerio extracted a title, description, or image, process article readability and return
-    if (cheerioData && (cheerioData.title || cheerioData.description || cheerioData.image)) {
+    // If Cheerio extracted valid metadata (and is NOT blocked), process article readability and return
+    if (cheerioData && !isCheerioBlocked && (cheerioData.title || cheerioData.description || cheerioData.image)) {
       const snap = cheerioData.image || null;
       let articleData: ArticleData | null = null;
 
@@ -83,16 +87,21 @@ export const globalWebExtractor: PlatformExtractor<GlobalWebCardData> = {
         includeHtml: true,
       });
 
+      const isPwBlocked = isAccessDeniedOrChallenge(pwData.title, pwData.description, pwData.html);
+      if (isPwBlocked) {
+        throw new Error(`Playwright received access denied / bot challenge for ${targetUrl}`);
+      }
+
       let articleData: ArticleData | null = null;
-      const htmlToParse = pwData.html || cheerioData?.rawHtml;
+      const htmlToParse = pwData.html || (!isCheerioBlocked ? cheerioData?.rawHtml : null);
       if (htmlToParse) {
         articleData = extractArticleWithReadability(htmlToParse, targetUrl);
       }
 
-      let articleContent = articleData?.content_text || cheerioData?.articleContent || null;
-      let wordCount = articleData?.word_count ?? cheerioData?.wordCount ?? null;
-      let readingTimeMinutes = articleData?.reading_time_minutes ?? cheerioData?.readingTimeMinutes ?? null;
-      let pageIntent = articleData ? 'article' : cheerioData?.pageIntent;
+      let articleContent = articleData?.content_text || (!isCheerioBlocked ? cheerioData?.articleContent : null);
+      let wordCount = articleData?.word_count ?? (!isCheerioBlocked ? cheerioData?.wordCount : null);
+      let readingTimeMinutes = articleData?.reading_time_minutes ?? (!isCheerioBlocked ? cheerioData?.readingTimeMinutes : null);
+      let pageIntent = articleData ? 'article' : (!isCheerioBlocked ? cheerioData?.pageIntent : null);
 
       if (!articleContent && pwData.html) {
         const $pw = cheerio.load(pwData.html);
@@ -103,18 +112,18 @@ export const globalWebExtractor: PlatformExtractor<GlobalWebCardData> = {
         pageIntent = detectPageIntent($pw, targetUrl, pwData.type, null, articleRes.wordCount);
       }
 
-      const snap = pwData.snapshot || cheerioData?.image || null;
+      const snap = pwData.snapshot || (!isCheerioBlocked ? cheerioData?.image : null) || null;
       return {
-        title: pwData.title || cheerioData?.title || fallbackTitle(targetUrl),
-        description: pwData.description || cheerioData?.description || '',
+        title: pwData.title || (!isCheerioBlocked ? cheerioData?.title : null) || fallbackTitle(targetUrl),
+        description: pwData.description || (!isCheerioBlocked ? cheerioData?.description : null) || '',
         logo: pwData.logo || cheerioData?.logo || resolveUrl('/favicon.ico', targetUrl),
-        ogSiteName: pwData.ogSiteName || cheerioData?.ogSiteName || null,
+        ogSiteName: pwData.ogSiteName || (!isCheerioBlocked ? cheerioData?.ogSiteName : null) || null,
         article: articleData,
         card_data: buildGlobalCardData(
-          articleData?.byline || pwData.author || cheerioData?.author || null,
-          pwData.publishedAt || cheerioData?.publishedAt || null,
-          pwData.ogSiteName || cheerioData?.ogSiteName || null,
-          articleData ? 'article' : (pwData.type || cheerioData?.type || null),
+          articleData?.byline || pwData.author || (!isCheerioBlocked ? cheerioData?.author : null) || null,
+          pwData.publishedAt || (!isCheerioBlocked ? cheerioData?.publishedAt : null) || null,
+          pwData.ogSiteName || (!isCheerioBlocked ? cheerioData?.ogSiteName : null) || null,
+          articleData ? 'article' : (pwData.type || (!isCheerioBlocked ? cheerioData?.type : null) || null),
           snap,
           pageIntent,
           articleContent,
@@ -123,29 +132,37 @@ export const globalWebExtractor: PlatformExtractor<GlobalWebCardData> = {
         ),
       };
     } catch {
-      const snap = cheerioData?.image || null;
-      const articleData = cheerioData?.rawHtml
+      const snap = !isCheerioBlocked ? (cheerioData?.image || null) : null;
+      const articleData = (!isCheerioBlocked && cheerioData?.rawHtml)
         ? extractArticleWithReadability(cheerioData.rawHtml, targetUrl)
         : null;
 
+      const safeTitle = (!isCheerioBlocked && cheerioData?.title)
+        ? cheerioData.title
+        : fallbackTitle(targetUrl);
+      const safeDesc = (!isCheerioBlocked && cheerioData?.description)
+        ? cheerioData.description
+        : '';
+
       return {
-        title: cheerioData?.title || fallbackTitle(targetUrl),
-        description: cheerioData?.description || '',
+        title: safeTitle,
+        description: safeDesc,
         logo: cheerioData?.logo || resolveUrl('/favicon.ico', targetUrl),
-        ogSiteName: cheerioData?.ogSiteName || null,
+        ogSiteName: !isCheerioBlocked ? (cheerioData?.ogSiteName || null) : null,
         article: articleData,
         card_data: buildGlobalCardData(
-          articleData?.byline || cheerioData?.author || null,
-          cheerioData?.publishedAt || null,
-          cheerioData?.ogSiteName || null,
-          articleData ? 'article' : (cheerioData?.type || null),
+          articleData?.byline || (!isCheerioBlocked ? cheerioData?.author : null) || null,
+          !isCheerioBlocked ? cheerioData?.publishedAt || null : null,
+          !isCheerioBlocked ? cheerioData?.ogSiteName || null : null,
+          articleData ? 'article' : (!isCheerioBlocked ? cheerioData?.type || null : null),
           snap,
-          articleData ? 'article' : cheerioData?.pageIntent,
-          articleData?.content_text || cheerioData?.articleContent,
-          articleData?.word_count ?? cheerioData?.wordCount,
-          articleData?.reading_time_minutes ?? cheerioData?.readingTimeMinutes
+          articleData ? 'article' : (!isCheerioBlocked ? cheerioData?.pageIntent : null),
+          articleData?.content_text || (!isCheerioBlocked ? cheerioData?.articleContent : null),
+          articleData?.word_count ?? (!isCheerioBlocked ? cheerioData?.wordCount : null),
+          articleData?.reading_time_minutes ?? (!isCheerioBlocked ? cheerioData?.readingTimeMinutes : null)
         ),
       };
     }
   },
 };
+
