@@ -1,6 +1,6 @@
 import { chromium, Browser } from 'playwright';
 import { resolveUrl } from '../utils/urlFormatter';
-import { cleanTitle, cleanDescription } from '../utils/textCleaner';
+import { cleanTitle, cleanDescription, isAccessDeniedOrChallenge } from '../utils/textCleaner';
 import { logger } from '../utils/logger';
 import { isPrivateIP } from '../utils/ssrfValidator';
 
@@ -99,8 +99,8 @@ class PlaywrightEngine {
           '--disable-sync',
           '--metrics-recording-only',
           '--blink-settings=imagesEnabled=false',
-          '--disable-extensions',
           '--mute-audio',
+          '--disable-blink-features=AutomationControlled',
         ],
       })
       .then((browser) => {
@@ -127,7 +127,14 @@ class PlaywrightEngine {
       viewport: options.viewport || { width: 1280, height: 720 },
       userAgent:
         options.userAgent ||
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    });
+
+    // Mask navigator.webdriver
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => undefined,
+      });
     });
 
     const page = await context.newPage();
@@ -170,7 +177,7 @@ class PlaywrightEngine {
       });
 
       // Navigate to target URL with configurable or default timeout
-      await page.goto(targetUrl, {
+      const response = await page.goto(targetUrl, {
         waitUntil: 'domcontentloaded',
         timeout: options.timeout || 7000,
       });
@@ -277,17 +284,29 @@ class PlaywrightEngine {
       // Only serialize HTML if explicitly requested to avoid CPU & memory serialization churn
       const html = options.includeHtml ? await page.content().catch(() => null) : null;
 
+      const cleanedTitle = cleanTitle(metaData.title);
+      const cleanedDesc = cleanDescription(metaData.description);
+      const status = response ? response.status() : 200;
+      const isBlocked =
+        status === 403 ||
+        status === 401 ||
+        isAccessDeniedOrChallenge(cleanedTitle, cleanedDesc, html);
+
+      if (isBlocked) {
+        logger.warn('PlaywrightEngine', `Encountered blocked/access denied page for ${targetUrl} (status: ${status}, title: "${cleanedTitle}")`);
+      }
+
       return {
-        title: cleanTitle(metaData.title),
-        description: cleanDescription(metaData.description),
-        snapshot,
+        title: isBlocked ? null : cleanedTitle,
+        description: isBlocked ? null : cleanedDesc,
+        snapshot: isBlocked ? null : snapshot,
         logo,
-        ogSiteName: metaData.ogSiteName,
-        author: metaData.author,
+        ogSiteName: isBlocked ? null : metaData.ogSiteName,
+        author: isBlocked ? null : metaData.author,
         authorAvatar: null,
-        publishedAt: metaData.publishedAt,
-        type: metaData.type,
-        html,
+        publishedAt: isBlocked ? null : metaData.publishedAt,
+        type: isBlocked ? 'website' : metaData.type,
+        html: isBlocked ? null : html,
         customData,
       };
     } finally {
