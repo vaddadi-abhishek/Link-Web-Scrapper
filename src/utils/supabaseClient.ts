@@ -36,6 +36,21 @@ export const supabaseAdmin: SupabaseClient = createClient(
 );
 
 /**
+ * Public Supabase client instance.
+ * Uses SUPABASE_ANON_KEY to perform standard user lifecycle operations (signup with confirmation email, OTP verification).
+ */
+export const supabasePublic: SupabaseClient = createClient(
+  supabaseUrl,
+  supabaseAnonKey,
+  {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+    },
+  }
+);
+
+/**
  * Returns an authenticated Supabase client strictly scoped to the caller's JWT token.
  * CRITICAL SECURITY GUARANTEE:
  * Uses SUPABASE_ANON_KEY (never the service role key). This ensures that PostgREST operates
