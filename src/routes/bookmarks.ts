@@ -20,6 +20,7 @@ router.get('/bookmarks', getBookmarksController);
 router.post('/bookmarks', createBookmarkController);
 router.get('/bookmarks/:id/article', getBookmarkArticleController);
 router.post('/bookmarks/:id/generate-ai', generateAiForBookmarkController);
+router.post('/bookmarks/:id/ai-context', generateAiForBookmarkController);
 router.delete('/bookmarks/:id', deleteBookmarkController);
 
 // User Plan & Preferences

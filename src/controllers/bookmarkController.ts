@@ -310,106 +310,25 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
       return;
     }
 
-    // Read user subscription & credit status
-    const sub = await getOrCreateUserSubscription(supabase, userId);
+    // 2. Dispatch platform extraction with canonical URL (fast pure metadata scraping)
+    const { result, platform: extractedPlatform } = await dispatchExtraction(canonicalUrl);
+    const platform = (result as ExtractionResult).type || extractedPlatform;
+    const metadataResult = result as ExtractionResult;
+    const siteName = deriveSiteName(canonicalUrl, result.ogSiteName);
 
-    // Check X-Auto-AI-Context header, fallback to body, fallback to user setting
-    const autoAiHeader = req.headers['x-auto-ai-context'];
-    let shouldRunAi = sub.auto_ai_context;
-    if (autoAiHeader !== undefined) {
-      shouldRunAi = String(autoAiHeader).toLowerCase() === 'true';
-    } else if (req.body?.auto_ai_context !== undefined) {
-      shouldRunAi = Boolean(req.body.auto_ai_context);
-    }
+    const extractedArticle = (result as ExtractionResult).article || null;
+    const isArticle = Boolean(extractedArticle);
 
-    // 2. Global check: has ANY bookmark for this exact canonical URL already completed AI analysis?
-    const existingGlobal = await findExistingCompletedBookmarkByUrl(searchUrls);
+    const cardDataObj = typeof result.card_data === 'object' && result.card_data !== null
+      ? (result.card_data as Record<string, unknown>)
+      : {};
+    const mediaList = Array.isArray(cardDataObj.media) ? (cardDataObj.media as Array<{ url?: string }>) : [];
+    const snapshotUrl =
+      (typeof cardDataObj.snapshot === 'string' ? cardDataObj.snapshot : null) ||
+      (mediaList[0]?.url || null);
 
-    let metadataResult: { title?: string | null; description?: string | null; logo?: string | null; card_data?: Record<string, unknown> | null };
-    let platform: string;
-    let siteName: string;
-    let snapshotUrl: string | null = null;
-    let aiStatus: 'completed' | 'pending_manual' | 'no_credits' | 'failed' = 'pending_manual';
-    let aiAnalysisResult: AIVisualAnalysisResult | null = null;
-    let isArticle = false;
-    let extractedArticle: ArticleData | null = null;
-
-    if (existingGlobal) {
-      const prevBm = existingGlobal.bookmark;
-      logger.info('BookmarkController', `Reusing existing analysis for canonical URL: ${canonicalUrl}. 0 Gemini calls, 0 credits deducted.`);
-      platform = prevBm.type || 'generic';
-      siteName = prevBm.site_name || '';
-      snapshotUrl = prevBm.snapshot_url || null;
-      isArticle = Boolean(prevBm.is_article);
-      metadataResult = {
-        title: prevBm.title,
-        description: prevBm.description || '',
-        logo: prevBm.logo_url || null,
-        card_data: prevBm.card_data || null,
-      };
-      aiStatus = 'completed';
-      aiAnalysisResult = {
-        ai_context: existingGlobal.aiContext.context || '',
-        ai_category: existingGlobal.aiContext.ai_category || [],
-        ai_tags: existingGlobal.aiContext.ai_tags || [],
-        visual_entities: existingGlobal.aiContext.visual_entities || [],
-        ocr_text: existingGlobal.aiContext.ocr_text || '',
-      };
-      // NOTE: deductOneAiCredit is SKIPPED! Neither Gemini API nor user credits are consumed.
-    } else {
-      // Fresh URL: Scrape metadata
-      const { result, platform: extractedPlatform } = await dispatchExtraction(canonicalUrl);
-      platform = (result as ExtractionResult).type || extractedPlatform;
-      metadataResult = result as ExtractionResult;
-      siteName = deriveSiteName(canonicalUrl, result.ogSiteName);
-
-      extractedArticle = (result as ExtractionResult).article || null;
-      isArticle = Boolean(extractedArticle);
-
-      const cardDataObj = typeof result.card_data === 'object' && result.card_data !== null
-        ? (result.card_data as Record<string, unknown>)
-        : {};
-      const mediaList = Array.isArray(cardDataObj.media) ? (cardDataObj.media as Array<{ url?: string }>) : [];
-      snapshotUrl =
-        (typeof cardDataObj.snapshot === 'string' ? cardDataObj.snapshot : null) ||
-        (mediaList[0]?.url || null);
-
-      // Evaluate AI Context creation
-      if (!shouldRunAi) {
-        // User opted out of auto-AI -> mark as pending_manual (card will show "Generate AI" in 3-dots)
-        aiStatus = 'pending_manual';
-      } else {
-        const { isEligible } = checkAiCreditEligibility(sub);
-
-        if (!isEligible) {
-          // Free user with 0 credits left -> skip AI, set badge flag
-          aiStatus = 'no_credits';
-        } else {
-          // Eligible -> Attempt Gemini AI analysis
-          try {
-            aiAnalysisResult = await analyzeVisualContext({
-              url: canonicalUrl,
-              title: result.title || '',
-              description: result.description || '',
-              snapshot: snapshotUrl,
-              site_name: siteName,
-              type: platform,
-              card_data: result.card_data,
-              article_content: typeof cardDataObj.article_content === 'string' ? cardDataObj.article_content : null,
-              page_intent: typeof cardDataObj.page_intent === 'string' ? cardDataObj.page_intent : null,
-            });
-
-            // SUCCESS: Now and ONLY now deduct 1 credit for free tier
-            await deductOneAiCredit(supabase, sub);
-            aiStatus = 'completed';
-          } catch (aiErr: unknown) {
-            const message = aiErr instanceof Error ? aiErr.message : String(aiErr);
-            logger.warn('BookmarkController', 'Gemini AI generation failed. Preserving user credits:', message);
-            aiStatus = 'failed';
-          }
-        }
-      }
-    }
+    // Initial ai_status is pending_manual; AI context is decoupled and triggered via /bookmarks/:id/ai-context
+    const aiStatus = 'pending_manual';
 
     // 3. Insert into bookmarks table with CANONICAL URL
     const { data: bookmarkRow, error: bmError } = await supabase
@@ -436,31 +355,7 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
       return;
     }
 
-    // 4. Insert into ai_context table if AI was generated successfully
-    let savedAiContext: AiContextDbRow | null = null;
-    if (aiStatus === 'completed' && aiAnalysisResult) {
-      const { data: aiRow, error: aiError } = await supabase
-        .from('ai_context')
-        .insert({
-          bookmark_id: bookmarkRow.id,
-          user_id: userId,
-          context: aiAnalysisResult.ai_context || '',
-          ai_category: aiAnalysisResult.ai_category || [],
-          ai_tags: aiAnalysisResult.ai_tags || [],
-          visual_entities: aiAnalysisResult.visual_entities || [],
-          ocr_text: aiAnalysisResult.ocr_text || '',
-        })
-        .select()
-        .single();
-
-      if (aiError) {
-        logger.error('BookmarkController', 'Failed to insert ai_context into Supabase:', aiError.message);
-      } else {
-        savedAiContext = aiRow as AiContextDbRow;
-      }
-    }
-
-    // 5. Insert into articles table if article was extracted
+    // 4. Insert into articles table if article was extracted
     if (isArticle && extractedArticle) {
       const { error: articleError } = await supabase
         .from('articles')
@@ -475,34 +370,9 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
       if (articleError) {
         logger.error('BookmarkController', 'Failed to insert article into Supabase:', articleError.message);
       }
-    } else if (isArticle && existingGlobal) {
-      // Reusing existing article for this canonical URL
-      try {
-        const { data: existingArticle } = await supabaseAdmin
-          .from('articles')
-          .select('content_html, word_count, reading_time_minutes')
-          .eq('bookmark_id', existingGlobal.bookmark.id)
-          .maybeSingle();
-
-        if (existingArticle) {
-          await supabase.from('articles').insert({
-            bookmark_id: bookmarkRow.id,
-            user_id: userId,
-            content_html: existingArticle.content_html,
-            word_count: existingArticle.word_count,
-            reading_time_minutes: existingArticle.reading_time_minutes || 1,
-          });
-        }
-      } catch (err: unknown) {
-        logger.warn('BookmarkController', 'Could not copy existing article content:', err);
-      }
     }
 
-    const finalResponse = mapBookmarkRow({
-      ...(bookmarkRow as BookmarkDbRow),
-      ai_context: savedAiContext,
-    });
-
+    const finalResponse = mapBookmarkRow(bookmarkRow as BookmarkDbRow);
     res.status(201).json(finalResponse);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
@@ -605,20 +475,47 @@ export async function generateAiForBookmarkController(req: AuthenticatedRequest,
 
     // 4. Run Gemini AI
     try {
-      const cardDataObj = typeof bookmark.card_data === 'object' && bookmark.card_data !== null
-        ? (bookmark.card_data as Record<string, unknown>)
-        : {};
+      let parsedCardData: Record<string, unknown> = {};
+      if (bookmark.card_data) {
+        if (typeof bookmark.card_data === 'string') {
+          try {
+            parsedCardData = JSON.parse(bookmark.card_data);
+          } catch {}
+        } else if (typeof bookmark.card_data === 'object' && bookmark.card_data !== null) {
+          parsedCardData = bookmark.card_data as Record<string, unknown>;
+        }
+      }
+
+      const mediaList = Array.isArray(parsedCardData.media) ? (parsedCardData.media as Array<{ url?: string }>) : [];
+      const candidateSnapshot =
+        bookmark.snapshot_url ||
+        (typeof parsedCardData.snapshot === 'string' ? parsedCardData.snapshot : null) ||
+        (mediaList[0]?.url || null);
+
+      let articleContent = typeof parsedCardData.article_content === 'string' ? parsedCardData.article_content : null;
+      if (!articleContent && bookmark.is_article) {
+        try {
+          const { data: art } = await supabase
+            .from('articles')
+            .select('content_html')
+            .eq('bookmark_id', bookmarkId)
+            .maybeSingle();
+          if (art?.content_html) {
+            articleContent = art.content_html.replace(/<[^>]*>/g, ' ').slice(0, 5000);
+          }
+        } catch {}
+      }
 
       const aiAnalysis = await analyzeVisualContext({
         url: bookmark.url,
         title: bookmark.title || '',
         description: bookmark.description || '',
-        snapshot: bookmark.snapshot_url,
+        snapshot: candidateSnapshot,
         site_name: bookmark.site_name,
         type: bookmark.type,
-        card_data: bookmark.card_data,
-        article_content: typeof cardDataObj.article_content === 'string' ? cardDataObj.article_content : null,
-        page_intent: typeof cardDataObj.page_intent === 'string' ? cardDataObj.page_intent : null,
+        card_data: parsedCardData,
+        article_content: articleContent,
+        page_intent: typeof parsedCardData.page_intent === 'string' ? parsedCardData.page_intent : null,
       });
 
       // SUCCESS: Deduct 1 credit now
