@@ -1,19 +1,19 @@
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 
 /**
  * Strict rate limiter for authentication routes (login, signup, password reset).
  * Restricts brute-force password guessing, automated credential stuffing, and bot abuse.
- * Window: 15 minutes, Max: 5 requests per IP.
+ * Window: 15 minutes, Max: 15 failed requests per IP (skips successful attempts).
  */
 export const authRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // 5 requests per window per IP
+  max: 15, // 15 requests per window per IP
   standardHeaders: 'draft-7',
   legacyHeaders: false,
+  skipSuccessfulRequests: true,
   message: {
     error: 'Too many authentication attempts. Please try again after 15 minutes.',
   },
-  skipSuccessfulRequests: false,
 });
 
 /**
@@ -26,34 +26,37 @@ export const otpRateLimiter = rateLimit({
   max: 10,
   standardHeaders: 'draft-7',
   legacyHeaders: false,
+  skipSuccessfulRequests: true,
   message: {
     error: 'Too many verification attempts. Please wait a few minutes before trying again.',
   },
-  skipSuccessfulRequests: false,
 });
 
 /**
  * Anti-spam rate limiter for OTP resend requests.
  * Defends against email bombing, quota exhaustion, and griefing.
- * Window: 15 minutes, Max: 3 resend attempts per IP.
+ * Window: 15 minutes, Max: 5 resend attempts per IP.
  */
 export const resendOtpRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 3,
+  max: 5,
   standardHeaders: 'draft-7',
   legacyHeaders: false,
+  skipSuccessfulRequests: false,
   message: {
     error: 'Too many verification code requests. Please wait 15 minutes before requesting another code.',
   },
-  skipSuccessfulRequests: false,
 });
 
 /**
  * Key generator that throttles authenticated users by user ID,
- * falling back to client IP for unauthenticated requests.
+ * falling back to client IP for unauthenticated requests with IPv6 normalization.
  */
 const userOrIpKey = (req: any): string => {
-  return req.user?.id || req.ip || req.headers['x-forwarded-for']?.toString() || 'unknown';
+  if (req.user?.id) {
+    return req.user.id;
+  }
+  return ipKeyGenerator(req.ip || '127.0.0.1');
 };
 
 /**
@@ -64,6 +67,7 @@ export const apiRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 300,
   keyGenerator: userOrIpKey,
+  validate: { keyGeneratorIpFallback: false, xForwardedForHeader: false },
   standardHeaders: 'draft-7',
   legacyHeaders: false,
   message: {
@@ -80,6 +84,7 @@ export const heavyScrapingRateLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
   max: 20,
   keyGenerator: userOrIpKey,
+  validate: { keyGeneratorIpFallback: false, xForwardedForHeader: false },
   standardHeaders: 'draft-7',
   legacyHeaders: false,
   message: {
