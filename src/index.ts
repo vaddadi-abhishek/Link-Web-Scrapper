@@ -19,6 +19,9 @@ initializeHttpClient();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Trust reverse proxy (Render, Vercel, Cloudflare) for accurate client IP resolution and rate limiting
+app.set('trust proxy', 1);
+
 // Security: Helmet HTTP Headers
 app.use(
   helmet({
@@ -36,46 +39,58 @@ app.use(
 app.disable('x-powered-by');
 
 // Allowed Origins Whitelist
-const allowedOrigins = [
+const rawAllowedOrigins = [
   process.env.FRONTEND_URL,
-  process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : [],
+  ...(process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : []),
   'http://localhost:5173',
   'http://127.0.0.1:5173',
   'http://localhost:3000',
   'http://127.0.0.1:3000',
-]
+  'https://usemindspace.vercel.app',
+  'https://mindspace.vercel.app',
+  'https://mindspace-link-web-scrapper.onrender.com',
+  'https://mindspace-node-backend.onrender.com',
+];
+
+const allowedOrigins = rawAllowedOrigins
   .flat()
   .filter(Boolean)
-  .map((o) => (o as string).trim());
+  .map((o) => (o as string).trim().replace(/\/+$/, ''));
 
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      // Allow requests with no origin (like mobile apps, curl, server-to-server)
-      if (!origin) return callback(null, true);
+const corsOptions: cors.CorsOptions = {
+  origin: (origin, callback) => {
+    // Allow requests with no origin (like mobile apps, curl, server-to-server)
+    if (!origin) return callback(null, true);
 
-      // Check if origin matches allowed list or local LAN
-      const isAllowed =
-        allowedOrigins.includes(origin) ||
-        /^http:\/\/192\.168\.\d+\.\d+(:\d+)?$/.test(origin) ||
-        /^http:\/\/localhost(:\d+)?$/.test(origin) ||
-        /^http:\/\/127\.0\.0\.1(:\d+)?$/.test(origin) ||
-        origin === 'https://mindspace.vercel.app' ||
-        /^https:\/\/mindspace(-[a-z0-9-]+)?\.vercel\.app$/.test(origin) ||
-        origin === 'https://mindspace-node-backend.onrender.com';
+    // Normalize origin: strip trailing slashes
+    const cleanOrigin = origin.trim().replace(/\/+$/, '');
 
-      if (isAllowed) {
-        callback(null, true);
-      } else {
-        logger.warn('CORS', `Blocked request from untrusted origin: ${origin}`);
-        callback(new Error('Not allowed by CORS'));
-      }
-    },
-    credentials: true,
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Auto-AI-Context', 'Prefer'],
-    methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-  })
-);
+    // Check if origin matches allowed list, local LAN, Vercel deployments, or Chrome extension
+    const isAllowed =
+      allowedOrigins.includes(cleanOrigin) ||
+      /^http:\/\/192\.168\.\d+\.\d+(:\d+)?$/.test(cleanOrigin) ||
+      /^http:\/\/localhost(:\d+)?$/.test(cleanOrigin) ||
+      /^http:\/\/127\.0\.0\.1(:\d+)?$/.test(cleanOrigin) ||
+      cleanOrigin === 'https://usemindspace.vercel.app' ||
+      cleanOrigin === 'https://mindspace.vercel.app' ||
+      cleanOrigin.endsWith('.vercel.app') ||
+      cleanOrigin.startsWith('chrome-extension://');
+
+    if (isAllowed) {
+      callback(null, true);
+    } else {
+      logger.warn('CORS', `Blocked request from untrusted origin: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Auto-AI-Context', 'Prefer'],
+  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+  optionsSuccessStatus: 200,
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
