@@ -176,11 +176,24 @@ export async function verifyOtpController(req: Request, res: Response): Promise<
       return;
     }
 
-    const { data, error } = await supabasePublic.auth.verifyOtp({
+    let { data, error } = await supabasePublic.auth.verifyOtp({
       email: trimmedEmail,
       token: trimmedToken,
       type: type === 'email' ? 'email' : 'signup',
     });
+
+    // Fallback: If verifying with 'signup' failed, try 'email' (handles resends and unconfirmed existing accounts)
+    if ((error || !data.user) && type !== 'email') {
+      const fallbackResult = await supabasePublic.auth.verifyOtp({
+        email: trimmedEmail,
+        token: trimmedToken,
+        type: 'email',
+      });
+      if (!fallbackResult.error && fallbackResult.data?.user) {
+        data = fallbackResult.data;
+        error = null;
+      }
+    }
 
     if (error || !data.user) {
       logger.warn('AuthController', `OTP verification failed for ${trimmedEmail}:`, error?.message);
