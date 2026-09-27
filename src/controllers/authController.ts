@@ -394,3 +394,133 @@ export async function getCurrentUserController(req: AuthenticatedRequest, res: R
     res.status(500).json({ error: 'An unexpected error occurred. Please try again later.' });
   }
 }
+
+/**
+ * PATCH /api/v1/auth/profile
+ * Updates the user's username/displayName in Supabase user_metadata.
+ */
+export async function updateProfileController(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const user = req.user;
+    if (!user) {
+      res.status(401).json({ error: 'Unauthorized.' });
+      return;
+    }
+
+    const { username } = req.body;
+    if (!username || typeof username !== 'string' || username.trim().length < 2) {
+      res.status(400).json({ error: 'Username must be at least 2 characters long.' });
+      return;
+    }
+
+    const trimmedUsername = username.trim();
+    const currentMetadata = user.user_metadata || {};
+
+    const { data, error } = await supabaseAdmin.auth.admin.updateUserById(user.id, {
+      user_metadata: {
+        ...currentMetadata,
+        username: trimmedUsername,
+        name: trimmedUsername,
+      },
+    });
+
+    if (error) {
+      logger.error('AuthController', 'Failed to update username:', error.message);
+      res.status(400).json({ error: error.message || 'Failed to update profile.' });
+      return;
+    }
+
+    res.status(200).json({
+      user: {
+        id: data.user.id,
+        email: data.user.email,
+        name: trimmedUsername,
+      },
+      message: 'Profile updated successfully.',
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error('AuthController', 'Unexpected error in updateProfile:', message);
+    res.status(500).json({ error: 'An unexpected error occurred. Please try again later.' });
+  }
+}
+
+/**
+ * PATCH /api/v1/auth/password
+ * Updates the authenticated user's password.
+ */
+export async function updatePasswordController(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const user = req.user;
+    if (!user) {
+      res.status(401).json({ error: 'Unauthorized.' });
+      return;
+    }
+
+    const { password } = req.body;
+    if (!password || typeof password !== 'string') {
+      res.status(400).json({ error: 'New password is required.' });
+      return;
+    }
+
+    if (!PASSWORD_REGEX.test(password)) {
+      res.status(400).json({
+        error: 'Password must be at least 8 characters long and contain at least one uppercase letter, one lowercase letter, and one number.',
+      });
+      return;
+    }
+
+    const { error } = await supabaseAdmin.auth.admin.updateUserById(user.id, {
+      password,
+    });
+
+    if (error) {
+      logger.error('AuthController', 'Failed to update password:', error.message);
+      res.status(400).json({ error: error.message || 'Failed to update password.' });
+      return;
+    }
+
+    res.status(200).json({
+      message: 'Password changed successfully.',
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error('AuthController', 'Unexpected error in updatePassword:', message);
+    res.status(500).json({ error: 'An unexpected error occurred. Please try again later.' });
+  }
+}
+
+/**
+ * DELETE /api/v1/auth/account
+ * Deletes user bookmarks, user_subscriptions, and removes user from Supabase.
+ */
+export async function deleteAccountController(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const user = req.user;
+    if (!user) {
+      res.status(401).json({ error: 'Unauthorized.' });
+      return;
+    }
+
+    // Clean up user data
+    await supabaseAdmin.from('bookmarks').delete().eq('user_id', user.id);
+    await supabaseAdmin.from('user_subscriptions').delete().eq('user_id', user.id);
+
+    // Delete user from Supabase auth
+    const { error } = await supabaseAdmin.auth.admin.deleteUser(user.id);
+    if (error) {
+      logger.error('AuthController', 'Failed to delete user account:', error.message);
+      res.status(400).json({ error: error.message || 'Failed to delete account.' });
+      return;
+    }
+
+    res.status(200).json({
+      message: 'Account deleted successfully.',
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error('AuthController', 'Unexpected error in deleteAccount:', message);
+    res.status(500).json({ error: 'An unexpected error occurred. Please try again later.' });
+  }
+}
+

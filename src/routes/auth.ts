@@ -7,6 +7,9 @@ import {
   getCurrentUserController,
   verifyOtpController,
   resendOtpController,
+  updateProfileController,
+  updatePasswordController,
+  deleteAccountController,
 } from '../controllers/authController';
 import {
   authRateLimiter,
@@ -25,7 +28,10 @@ router.post('/resend-otp', resendOtpRateLimiter, resendOtpController);
 router.post('/refresh', authRateLimiter, refreshTokenController);
 router.post('/forgot-password', authRateLimiter, forgotPasswordController);
 
-// Authenticated session check
+// Authenticated session & profile management
 router.get('/me', authMiddleware, getCurrentUserController);
+router.patch('/profile', authMiddleware, updateProfileController);
+router.patch('/password', authMiddleware, updatePasswordController);
+router.delete('/account', authMiddleware, deleteAccountController);
 
 export default router;
