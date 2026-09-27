@@ -285,9 +285,23 @@ export async function refreshTokenController(req: Request, res: Response): Promi
       return;
     }
 
-    const { data, error } = await supabaseAdmin.auth.refreshSession({
-      refresh_token: refreshToken.trim(),
+    const trimmedToken = refreshToken.trim();
+
+    // Attempt token refresh via supabasePublic first, falling back to supabaseAdmin if necessary
+    let refreshResult = await supabasePublic.auth.refreshSession({
+      refresh_token: trimmedToken,
     });
+
+    if ((refreshResult.error || !refreshResult.data?.session) && supabaseAdmin !== supabasePublic) {
+      const adminResult = await supabaseAdmin.auth.refreshSession({
+        refresh_token: trimmedToken,
+      });
+      if (!adminResult.error && adminResult.data?.session) {
+        refreshResult = adminResult;
+      }
+    }
+
+    const { data, error } = refreshResult;
 
     if (error || !data.session || !data.user) {
       logger.warn('AuthController', 'Token refresh failed:', error?.message);
