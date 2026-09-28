@@ -457,10 +457,24 @@ export async function updatePasswordController(req: AuthenticatedRequest, res: R
       return;
     }
 
-    const { password } = req.body;
+    const { password, currentPassword } = req.body;
     if (!password || typeof password !== 'string') {
       res.status(400).json({ error: 'New password is required.' });
       return;
+    }
+
+    if (currentPassword) {
+      if (user.email) {
+        const { error: verifyError } = await supabasePublic.auth.signInWithPassword({
+          email: user.email,
+          password: currentPassword,
+        });
+
+        if (verifyError) {
+          res.status(400).json({ error: 'Incorrect current password.' });
+          return;
+        }
+      }
     }
 
     if (!PASSWORD_REGEX.test(password)) {
