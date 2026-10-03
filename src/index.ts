@@ -65,7 +65,7 @@ const corsOptions: cors.CorsOptions = {
     // Normalize origin: strip trailing slashes
     const cleanOrigin = origin.trim().replace(/\/+$/, '');
 
-    // Check if origin matches allowed list, local LAN, Vercel deployments, or Chrome extension
+    // Check if origin matches allowed list, local LAN, Mindspace Vercel deployments, or Chrome extension
     const isAllowed =
       allowedOrigins.includes(cleanOrigin) ||
       /^http:\/\/192\.168\.\d+\.\d+(:\d+)?$/.test(cleanOrigin) ||
@@ -73,8 +73,10 @@ const corsOptions: cors.CorsOptions = {
       /^http:\/\/127\.0\.0\.1(:\d+)?$/.test(cleanOrigin) ||
       cleanOrigin === 'https://usemindspace.vercel.app' ||
       cleanOrigin === 'https://mindspace.vercel.app' ||
-      cleanOrigin.endsWith('.vercel.app') ||
-      cleanOrigin.startsWith('chrome-extension://');
+      /^https:\/\/mindspace(-[a-z0-9-]+)?\.vercel\.app$/i.test(cleanOrigin) ||
+      (process.env.CHROME_EXTENSION_ID
+        ? cleanOrigin === `chrome-extension://${process.env.CHROME_EXTENSION_ID}`
+        : cleanOrigin.startsWith('chrome-extension://'));
 
     if (isAllowed) {
       callback(null, true);

@@ -463,18 +463,24 @@ export async function updatePasswordController(req: AuthenticatedRequest, res: R
       return;
     }
 
-    if (currentPassword) {
-      if (user.email) {
-        const { error: verifyError } = await supabasePublic.auth.signInWithPassword({
-          email: user.email,
-          password: currentPassword,
-        });
+    if (!currentPassword || typeof currentPassword !== 'string') {
+      res.status(400).json({ error: 'Current password is required to change your password.' });
+      return;
+    }
 
-        if (verifyError) {
-          res.status(400).json({ error: 'Incorrect current password.' });
-          return;
-        }
-      }
+    if (!user.email) {
+      res.status(400).json({ error: 'User account has no associated email.' });
+      return;
+    }
+
+    const { error: verifyError } = await supabasePublic.auth.signInWithPassword({
+      email: user.email,
+      password: currentPassword,
+    });
+
+    if (verifyError) {
+      res.status(400).json({ error: 'Incorrect current password.' });
+      return;
     }
 
     if (!PASSWORD_REGEX.test(password)) {

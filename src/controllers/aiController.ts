@@ -1,8 +1,10 @@
-import { Request, Response } from 'express';
+import { Response } from 'express';
+import { AuthenticatedRequest } from '../middleware/authMiddleware';
 import { analyzeVisualContext, AIVisualAnalysisInput } from '../services/aiVisualService';
+import { reserveUserCredit, refundUserCredit } from '../services/subscriptionService';
 import { logger } from '../utils/logger';
 
-export const aiAnalyzeController = async (req: Request, res: Response): Promise<void> => {
+export const aiAnalyzeController = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const payload: AIVisualAnalysisInput = req.body;
 
@@ -11,8 +13,27 @@ export const aiAnalyzeController = async (req: Request, res: Response): Promise<
       return;
     }
 
-    const result = await analyzeVisualContext(payload);
-    res.status(200).json(result);
+    const supabase = req.supabase!;
+    const userId = req.user!.id;
+
+    // Atomically reserve 1 credit before invoking Gemini API
+    const reservation = await reserveUserCredit(supabase, userId);
+    if (!reservation.success) {
+      res.status(402).json({
+        error: 'NO_CREDITS_LEFT',
+        message: 'No free AI credits remaining for this period.',
+      });
+      return;
+    }
+
+    try {
+      const result = await analyzeVisualContext(payload);
+      res.status(200).json(result);
+    } catch (aiErr: unknown) {
+      // Refund reserved credit if analysis fails
+      await refundUserCredit(supabase, userId);
+      throw aiErr;
+    }
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     logger.error('AIController', 'AI analysis failed:', message);

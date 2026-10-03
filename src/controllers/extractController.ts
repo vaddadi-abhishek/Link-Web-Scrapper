@@ -36,6 +36,12 @@ export const extractMetadataController = async (req: Request, res: Response): Pr
 
     // Canonicalize the URL (strips tracking query params, unifies /reels/ to /reel/, normalizes hostnames)
     const canonicalUrl = canonicalizeUrl(effectiveUrl) || effectiveUrl;
+
+    const isCanonicalSafe = await validateUrlAgainstSSRF(canonicalUrl);
+    if (!isCanonicalSafe) {
+      res.status(400).json({ error: 'Security Error: Invalid or internal URL provided (Possible SSRF attack blocked).' });
+      return;
+    }
     
     const html = req.body?.html;
     const forceRefresh = Boolean(

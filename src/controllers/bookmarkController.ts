@@ -169,11 +169,17 @@ export async function getBookmarksController(req: AuthenticatedRequest, res: Res
     const supabase = req.supabase!;
     const userId = req.user!.id;
 
+    const limitQuery = req.query.limit ? parseInt(req.query.limit as string, 10) : 250;
+    const offsetQuery = req.query.offset ? parseInt(req.query.offset as string, 10) : 0;
+    const safeLimit = Math.min(Math.max(1, isNaN(limitQuery) ? 250 : limitQuery), 500);
+    const safeOffset = Math.max(0, isNaN(offsetQuery) ? 0 : offsetQuery);
+
     const { data, error } = await supabase
       .from('bookmarks')
       .select('*, ai_context(*)')
       .eq('user_id', userId)
-      .order('created_at', { ascending: false });
+      .order('created_at', { ascending: false })
+      .range(safeOffset, safeOffset + safeLimit - 1);
 
     if (error) {
       logger.error('BookmarkController', `Failed to fetch bookmarks for ${userId}:`, error.message);
@@ -207,6 +213,10 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
     }
 
     const trimmedUrl = rawUrl.trim();
+    if (trimmedUrl.length > 2048) {
+      res.status(400).json({ error: 'URL exceeds maximum permitted length of 2048 characters.' });
+      return;
+    }
     // Resolve shortlinks (e.g. reddit.com/r/.../s/..., pin.it/...) to their true destination URL
     let effectiveUrl = trimmedUrl;
     if (isResolvableShortlink(trimmedUrl)) {

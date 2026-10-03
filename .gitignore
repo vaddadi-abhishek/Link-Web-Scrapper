@@ -25,4 +25,6 @@ dist-ssr
 *.sw?
 
 
-schema.sql
+# Database & Supabase Migrations
+supabase/
+*.sql

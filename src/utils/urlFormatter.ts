@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { validateUrlAgainstSSRF } from './ssrfValidator';
 
 /**
  * URL normalization, resolution, and canonicalization utilities.
@@ -93,43 +94,61 @@ export function isResolvableShortlink(url: string | null | undefined): boolean {
 }
 
 /**
- * Resolves redirect shortlinks (e.g. reddit.com/r/sub/s/xyz, pin.it/xyz) to their final destination URL.
+ * Resolves redirect shortlinks (e.g. reddit.com/r/sub/s/xyz, pin.it/xyz) to their final destination URL,
+ * inspecting every redirect hop to prevent SSRF against internal/cloud endpoints.
  */
 export async function resolveShortlink(url: string, timeoutMs: number = 3000): Promise<string> {
   if (!isResolvableShortlink(url)) {
     return url;
   }
-  try {
-    const res = await axios.get(url, {
-      maxRedirects: 5,
-      timeout: timeoutMs,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      },
-      validateStatus: (status) => status < 400,
-    });
-    const finalUrl = res.request?.res?.responseUrl || res.request?.responseURL;
-    if (finalUrl && typeof finalUrl === 'string' && finalUrl.startsWith('http')) {
-      return finalUrl;
+
+  let currentUrl = url;
+  const maxHops = 5;
+
+  for (let hop = 0; hop < maxHops; hop++) {
+    const isSafe = await validateUrlAgainstSSRF(currentUrl);
+    if (!isSafe) {
+      // Abort redirect traversal if any hop targets internal infrastructure
+      return url;
     }
-  } catch {
+
     try {
-      const manualRes = await axios.get(url, {
+      const res = await axios.get(currentUrl, {
         maxRedirects: 0,
         timeout: timeoutMs,
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         },
-        validateStatus: (status) => status >= 300 && status < 400,
+        validateStatus: (status) => status >= 200 && status < 400,
       });
-      const loc = manualRes.headers?.location;
-      if (loc) {
-        return loc.startsWith('http') ? loc : new URL(loc, url).toString();
+
+      if (res.status >= 301 && res.status <= 308) {
+        const location = res.headers?.location;
+        if (!location) break;
+
+        const nextUrl = new URL(location, currentUrl).toString();
+        const nextSafe = await validateUrlAgainstSSRF(nextUrl);
+        if (!nextSafe) {
+          return url;
+        }
+
+        currentUrl = nextUrl;
+        if (!isResolvableShortlink(currentUrl)) {
+          return currentUrl;
+        }
+        continue;
       }
-    } catch {}
+
+      // If 200 OK, return the current URL
+      return currentUrl;
+    } catch {
+      break;
+    }
   }
-  return url;
+
+  return currentUrl;
 }
 
 /**

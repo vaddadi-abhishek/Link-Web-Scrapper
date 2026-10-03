@@ -9,6 +9,7 @@ import { pinterestExtractor } from './pinterest';
 import { globalWebExtractor } from './globalWeb';
 import { extractionCache } from '../../utils/cache';
 import { canonicalizeUrl, isResolvableShortlink, resolveShortlink } from '../../utils/urlFormatter';
+import { validateUrlAgainstSSRF } from '../../utils/ssrfValidator';
 import { isAccessDeniedOrChallenge } from '../../utils/textCleaner';
 import { logger } from '../../utils/logger';
 
@@ -61,6 +62,11 @@ export async function dispatchExtraction(
   let effectiveUrl = targetUrl.trim();
   if (isResolvableShortlink(effectiveUrl)) {
     effectiveUrl = await resolveShortlink(effectiveUrl);
+  }
+
+  const isSafe = await validateUrlAgainstSSRF(effectiveUrl);
+  if (!isSafe) {
+    throw new Error('Security Error: Invalid or internal URL provided (Possible SSRF attack blocked).');
   }
 
   const canonicalUrl = canonicalizeUrl(effectiveUrl) || effectiveUrl;

@@ -31,7 +31,7 @@ router.post('/forgot-password', authRateLimiter, forgotPasswordController);
 // Authenticated session & profile management
 router.get('/me', authMiddleware, getCurrentUserController);
 router.patch('/profile', authMiddleware, updateProfileController);
-router.patch('/password', authMiddleware, updatePasswordController);
-router.delete('/account', authMiddleware, deleteAccountController);
+router.patch('/password', authMiddleware, authRateLimiter, updatePasswordController);
+router.delete('/account', authMiddleware, authRateLimiter, deleteAccountController);
 
 export default router;
