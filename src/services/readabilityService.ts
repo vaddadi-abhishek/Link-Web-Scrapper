@@ -1,10 +1,79 @@
 import { Readability } from '@mozilla/readability';
 import { parseHTML } from 'linkedom';
+import DOMPurifyFactory from 'dompurify';
+import { JSDOM } from 'jsdom';
 import { ArticleData } from './extractors/types';
 import { logger } from '../utils/logger';
 
+const domWindow = new JSDOM('').window;
+const DOMPurify = DOMPurifyFactory(domWindow as any);
+
 export interface ReadabilityOptions {
   minWordCount?: number;
+}
+
+/**
+ * Sanitizes extracted article HTML strictly against XSS attacks.
+ * Restricts tags strictly to structural elements and attributes to href, src, alt, title,
+ * while rejecting javascript: and other dangerous pseudo-protocols.
+ */
+export function sanitizeArticleHtml(rawHtml: string): string {
+  return DOMPurify.sanitize(rawHtml, {
+    ALLOWED_TAGS: [
+      'p',
+      'h1',
+      'h2',
+      'h3',
+      'h4',
+      'blockquote',
+      'code',
+      'pre',
+      'ul',
+      'ol',
+      'li',
+      'strong',
+      'em',
+      'a',
+      'img',
+    ],
+    ALLOWED_ATTR: ['href', 'src', 'alt', 'title'],
+    ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
+  });
+}
+
+/**
+ * Synthesizes clean canonical Markdown from sanitized article HTML.
+ */
+export function synthesizeMarkdownFromHtml(sanitizedHtml: string): string {
+  if (!sanitizedHtml) return '';
+  return sanitizedHtml
+    .replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, '# $1\n\n')
+    .replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, '## $1\n\n')
+    .replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, '### $1\n\n')
+    .replace(/<h4[^>]*>([\s\S]*?)<\/h4>/gi, '#### $1\n\n')
+    .replace(/<blockquote[^>]*>([\s\S]*?)<\/blockquote>/gi, '> $1\n\n')
+    .replace(/<pre><code[^>]*>([\s\S]*?)<\/code><\/pre>/gi, '```\n$1\n```\n\n')
+    .replace(/<code[^>]*>([\s\S]*?)<\/code>/gi, '`$1`')
+    .replace(/<strong[^>]*>([\s\S]*?)<\/strong>/gi, '**$1**')
+    .replace(/<b[^>]*>([\s\S]*?)<\/b>/gi, '**$1**')
+    .replace(/<em[^>]*>([\s\S]*?)<\/em>/gi, '*$1*')
+    .replace(/<i[^>]*>([\s\S]*?)<\/i>/gi, '*$1*')
+    .replace(/<a\s+(?:[^>]*?\s+)?href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, '[$2]($1)')
+    .replace(/<img\s+(?:[^>]*?\s+)?src="([^"]*)"(?:\s+alt="([^"]*)")?[^>]*>/gi, '![$2]($1)')
+    .replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, '- $1\n')
+    .replace(/<\/ul>/gi, '\n')
+    .replace(/<\/ol>/gi, '\n')
+    .replace(/<p[^>]*>([\s\S]*?)<\/p>/gi, '$1\n\n')
+    .replace(/<br\s*[\/]?>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 /**
@@ -121,9 +190,13 @@ export function extractArticleWithReadability(
     // Standard human reading speed: ~200 words per minute
     const readingTimeMinutes = Math.max(1, Math.ceil(wordCount / 200));
 
+    const sanitizedHtml = sanitizeArticleHtml(parsed.content);
+    const canonicalMarkdown = synthesizeMarkdownFromHtml(sanitizedHtml);
+
     return {
-      content_html: parsed.content,
+      content_html: sanitizedHtml,
       content_text: textContent,
+      content_markdown: canonicalMarkdown,
       byline: parsed.byline || null,
       excerpt: parsed.excerpt || null,
       word_count: wordCount,

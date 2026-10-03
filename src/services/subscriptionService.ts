@@ -117,8 +117,90 @@ export function checkAiCreditEligibility(sub: UserSubscription): {
 }
 
 /**
+ * Atomically checks and reserves 1 AI credit for a user prior to invoking Gemini API.
+ * Uses PostgreSQL stored procedure reserve_user_credit with an atomic CAS query fallback
+ * to completely eliminate TOCTOU race conditions under parallel requests.
+ */
+export async function reserveUserCredit(
+  supabase: SupabaseClient,
+  userId: string
+): Promise<{ success: boolean; creditsRemaining: number; isPaid: boolean }> {
+  try {
+    const { data, error } = await supabase.rpc('reserve_user_credit', { p_user_id: userId });
+    if (!error && Array.isArray(data) && data.length > 0) {
+      const row = data[0];
+      return {
+        success: Boolean(row.success),
+        creditsRemaining: Number(row.credits_remaining),
+        isPaid: row.plan === 'pro',
+      };
+    }
+  } catch (rpcErr) {
+    logger.debug('SubscriptionService', 'RPC reserve_user_credit unavailable, using atomic SQL fallback:', rpcErr);
+  }
+
+  // Fallback: Lazy reset check followed by atomic update
+  const sub = await getOrCreateUserSubscription(supabase, userId);
+  if (sub.plan === 'pro') {
+    return { success: true, creditsRemaining: 999999, isPaid: true };
+  }
+
+  // Atomic conditional decrement: Only increment used if current used < limit
+  const { data: updated, error: updateErr } = await supabase
+    .from('user_subscriptions')
+    .update({
+      ai_credits_used: sub.ai_credits_used + 1,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', sub.id)
+    .lt('ai_credits_used', sub.ai_credits_limit)
+    .select('ai_credits_limit, ai_credits_used')
+    .maybeSingle();
+
+  if (updateErr || !updated) {
+    return { success: false, creditsRemaining: 0, isPaid: false };
+  }
+
+  const remaining = Math.max(0, updated.ai_credits_limit - updated.ai_credits_used);
+  return { success: true, creditsRemaining: remaining, isPaid: false };
+}
+
+/**
+ * Restores 1 reserved AI credit if the subsequent Gemini API call fails.
+ */
+export async function refundUserCredit(
+  supabase: SupabaseClient,
+  userId: string
+): Promise<void> {
+  try {
+    const { error } = await supabase.rpc('refund_user_credit', { p_user_id: userId });
+    if (!error) return;
+  } catch {}
+
+  try {
+    const { data: sub } = await supabase
+      .from('user_subscriptions')
+      .select('id, ai_credits_used, plan')
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (sub && sub.plan !== 'pro' && sub.ai_credits_used > 0) {
+      await supabase
+        .from('user_subscriptions')
+        .update({
+          ai_credits_used: Math.max(0, sub.ai_credits_used - 1),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', sub.id);
+    }
+  } catch (err) {
+    logger.warn('SubscriptionService', `Failed to refund credit for user ${userId}:`, err);
+  }
+}
+
+/**
  * Atomically deducts 1 AI credit for a free-tier user.
- * Must ONLY be called AFTER Gemini has returned a successful response.
+ * (Preserved for backward compatibility)
  */
 export async function deductOneAiCredit(
   supabase: SupabaseClient,

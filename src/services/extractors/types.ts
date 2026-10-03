@@ -138,6 +138,7 @@ export interface GlobalWebCardData {
 export interface ArticleData {
   content_html: string;
   content_text: string;
+  content_markdown?: string | null;
   byline?: string | null;
   excerpt?: string | null;
   word_count: number;

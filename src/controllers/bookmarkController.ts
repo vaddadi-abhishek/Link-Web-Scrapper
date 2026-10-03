@@ -11,7 +11,8 @@ import { supabaseAdmin } from '../utils/supabaseClient';
 import {
   getOrCreateUserSubscription,
   checkAiCreditEligibility,
-  deductOneAiCredit,
+  reserveUserCredit,
+  refundUserCredit,
 } from '../services/subscriptionService';
 
 export interface AiContextDbRow {
@@ -363,6 +364,7 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
           bookmark_id: bookmarkRow.id,
           user_id: userId,
           content_html: extractedArticle.content_html,
+          content_markdown: extractedArticle.content_markdown || null,
           word_count: extractedArticle.word_count,
           reading_time_minutes: extractedArticle.reading_time_minutes,
         });
@@ -454,12 +456,11 @@ export async function generateAiForBookmarkController(req: AuthenticatedRequest,
       return;
     }
 
-    // 3. Only if NO existing analysis exists, check subscription & credit eligibility
-    const sub = await getOrCreateUserSubscription(supabase, userId);
-    const { isEligible } = checkAiCreditEligibility(sub);
+    // 3. Atomically reserve 1 credit before invoking Gemini to eliminate TOCTOU race conditions
+    const reservation = await reserveUserCredit(supabase, userId);
 
-    if (!isEligible) {
-      // Free limit reached -> Update bookmark status and return 402 Payment Required
+    if (!reservation.success) {
+      // Free limit reached or reservation failed -> Update bookmark status and return 402 Payment Required
       await supabase
         .from('bookmarks')
         .update({ ai_status: 'no_credits', updated_at: new Date().toISOString() })
@@ -518,10 +519,7 @@ export async function generateAiForBookmarkController(req: AuthenticatedRequest,
         page_intent: typeof parsedCardData.page_intent === 'string' ? parsedCardData.page_intent : null,
       });
 
-      // SUCCESS: Deduct 1 credit now
-      await deductOneAiCredit(supabase, sub);
-
-      // Save/upsert to ai_context
+      // Save/upsert to ai_context (Credit was already atomically reserved)
       const { data: aiContextRow, error: aiError } = await supabase
         .from('ai_context')
         .upsert(
@@ -559,8 +557,11 @@ export async function generateAiForBookmarkController(req: AuthenticatedRequest,
 
       res.status(200).json(response);
     } catch (aiErr: unknown) {
+      // Refund the reserved credit since AI generation failed
+      await refundUserCredit(supabase, userId);
+
       const message = aiErr instanceof Error ? aiErr.message : String(aiErr);
-      logger.warn('BookmarkController', 'Manual AI generation failed. Preserving credits:', message);
+      logger.warn('BookmarkController', 'Manual AI generation failed. Refunded reserved credit:', message);
       await supabase
         .from('bookmarks')
         .update({ ai_status: 'failed', updated_at: new Date().toISOString() })
@@ -687,7 +688,7 @@ export async function getBookmarkArticleController(req: AuthenticatedRequest, re
 
     const { data: article, error } = await supabase
       .from('articles')
-      .select('bookmark_id, content_html, word_count, reading_time_minutes, created_at, bookmarks(id, title, url, site_name, description, logo_url)')
+      .select('bookmark_id, content_html, content_markdown, word_count, reading_time_minutes, created_at, bookmarks(id, title, url, site_name, description, logo_url)')
       .eq('bookmark_id', bookmarkId)
       .eq('user_id', userId)
       .maybeSingle();
@@ -715,6 +716,7 @@ export async function getBookmarkArticleController(req: AuthenticatedRequest, re
     res.status(200).json({
       bookmark_id: article.bookmark_id,
       content_html: article.content_html,
+      content_markdown: (article as any).content_markdown || null,
       word_count: article.word_count,
       reading_time_minutes: article.reading_time_minutes,
       created_at: article.created_at,

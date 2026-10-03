@@ -122,6 +122,12 @@ class PlaywrightEngine {
     targetUrl: string,
     options: PlaywrightScrapeOptions<T> = {}
   ): Promise<PlaywrightExtractionResult<T>> {
+    // 1. Strict Protocol Enforcement on target URL
+    const parsedTarget = new URL(targetUrl);
+    if (parsedTarget.protocol !== 'http:' && parsedTarget.protocol !== 'https:') {
+      throw new Error(`Invalid target URL protocol: "${parsedTarget.protocol}". Only http: and https: are allowed.`);
+    }
+
     const browser = await this.getBrowser();
     const context = await browser.newContext({
       viewport: options.viewport || { width: 1280, height: 720 },
@@ -142,16 +148,22 @@ class PlaywrightEngine {
     try {
       // Abort stylesheets, images, fonts, media, websockets, and trackers for ultra-fast rendering
       await page.route('**/*', (route) => {
-        const resourceType = route.request().resourceType();
-        if (BLOCKED_RESOURCE_TYPES.has(resourceType)) {
-          return route.abort().catch(() => {});
+        const rawUrl = route.request().url();
+
+        // Strictly enforce that the URL begins with http:// or https:// (abort file://, chrome://, data:, etc.)
+        if (!rawUrl.startsWith('http://') && !rawUrl.startsWith('https://')) {
+          return route.abort('blockedbyclient').catch(() => {});
         }
 
-        const rawUrl = route.request().url();
+        const resourceType = route.request().resourceType();
+        if (BLOCKED_RESOURCE_TYPES.has(resourceType)) {
+          return route.abort('blockedbyclient').catch(() => {});
+        }
+
         try {
           const parsed = new URL(rawUrl);
           if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-            return route.abort().catch(() => {});
+            return route.abort('blockedbyclient').catch(() => {});
           }
           const host = parsed.hostname.toLowerCase();
           if (
@@ -160,16 +172,16 @@ class PlaywrightEngine {
             host.endsWith('.internal') ||
             isPrivateIP(host)
           ) {
-            return route.abort().catch(() => {});
+            return route.abort('blockedbyclient').catch(() => {});
           }
         } catch {
-          return route.abort().catch(() => {});
+          return route.abort('blockedbyclient').catch(() => {});
         }
 
         const reqUrl = rawUrl.toLowerCase();
         for (const pattern of BLOCKED_TRACKER_PATTERNS) {
           if (reqUrl.includes(pattern)) {
-            return route.abort().catch(() => {});
+            return route.abort('blockedbyclient').catch(() => {});
           }
         }
 
