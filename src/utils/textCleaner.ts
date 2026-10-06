@@ -2,7 +2,7 @@
  * Utility for sanitizing and cleaning extracted titles and descriptions.
  */
 
-// Basic HTML Entity Unescaping
+// Comprehensive HTML Entity Unescaping
 export function unescapeHtml(text: string): string {
   if (!text) return '';
   if (!text.includes('&') && !text.includes('\\')) return text;
@@ -11,10 +11,33 @@ export function unescapeHtml(text: string): string {
     .replace(/&apos;/g, "'")
     .replace(/&#x27;/g, "'")
     .replace(/&#39;/g, "'")
+    .replace(/&mdash;/g, '—')
+    .replace(/&ndash;/g, '–')
+    .replace(/&hellip;/g, '…')
+    .replace(/&ldquo;/g, '“')
+    .replace(/&rdquo;/g, '”')
+    .replace(/&lsquo;/g, '‘')
+    .replace(/&rsquo;/g, '’')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => {
+      try {
+        const code = parseInt(h, 16);
+        return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : '';
+      } catch {
+        return '';
+      }
+    })
+    .replace(/&#([0-9]+);/g, (_, d) => {
+      try {
+        const code = parseInt(d, 10);
+        return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : '';
+      } catch {
+        return '';
+      }
+    })
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
-    .replace(/&nbsp;/g, ' ')
     .replace(/\\+([^a-zA-Z0-9\s])/g, '$1');
 }
 

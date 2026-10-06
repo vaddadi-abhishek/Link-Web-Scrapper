@@ -94,6 +94,16 @@ export const isPrivateIP = (ip: string): boolean => {
     return true;
   }
 
+  // If it is a valid IPv6 address that passed all private/reserved checks above, it is a safe public IP
+  if (normalizedIp.includes(':')) {
+    // Check documentation prefix 2001:db8::/32 and discard prefix 100::/64
+    if (normalizedIp.startsWith('2001:db8') || normalizedIp.startsWith('100:')) {
+      return true;
+    }
+    // Any remaining valid IPv6 format is a public global unicast IP (e.g. 2606:4700:..., 2a00:...)
+    return false;
+  }
+
   const parts = normalizedIp.split('.');
   if (parts.length !== 4) {
     // Any remaining non-IPv4 string that failed IPv6 checks above is treated as invalid/unsafe

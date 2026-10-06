@@ -322,7 +322,8 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
     }
 
     // 2. Dispatch platform extraction with canonical URL (fast pure metadata scraping)
-    const { result, platform: extractedPlatform } = await dispatchExtraction(canonicalUrl);
+    const requestHtml = typeof req.body?.html === 'string' && req.body.html.trim() ? req.body.html.trim() : undefined;
+    const { result, platform: extractedPlatform } = await dispatchExtraction(canonicalUrl, requestHtml);
     const platform = (result as ExtractionResult).type || extractedPlatform;
     const metadataResult = result as ExtractionResult;
     const siteName = deriveSiteName(canonicalUrl, result.ogSiteName);
@@ -330,13 +331,37 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
     const extractedArticle = (result as ExtractionResult).article || null;
     const isArticle = Boolean(extractedArticle);
 
+    const clientCardData = typeof req.body?.card_data === 'object' && req.body?.card_data !== null
+      ? (req.body.card_data as Record<string, unknown>)
+      : null;
+    const clientSnapshot = typeof req.body?.snapshot_url === 'string' && req.body.snapshot_url.trim()
+      ? req.body.snapshot_url.trim()
+      : null;
+    const clientTitle = typeof req.body?.title === 'string' && req.body.title.trim()
+      ? req.body.title.trim()
+      : null;
+    const clientDescription = typeof req.body?.description === 'string' && req.body.description.trim()
+      ? req.body.description.trim()
+      : null;
+
     const cardDataObj = typeof result.card_data === 'object' && result.card_data !== null
       ? (result.card_data as Record<string, unknown>)
       : {};
-    const mediaList = Array.isArray(cardDataObj.media) ? (cardDataObj.media as Array<{ url?: string }>) : [];
+
+    // Merge server extraction with client-provided data (e.g. from Mindspace browser extension)
+    const effectiveCardData = clientCardData && Object.keys(clientCardData).length > 0
+      ? { ...cardDataObj, ...clientCardData }
+      : cardDataObj;
+
+    const effectiveMediaList = Array.isArray(effectiveCardData.media) ? (effectiveCardData.media as Array<{ url?: string }>) : [];
     const snapshotUrl =
-      (typeof cardDataObj.snapshot === 'string' ? cardDataObj.snapshot : null) ||
-      (mediaList[0]?.url || null);
+      clientSnapshot ||
+      (typeof effectiveCardData.snapshot === 'string' ? effectiveCardData.snapshot : null) ||
+      (typeof effectiveCardData.video_thumbnail === 'string' ? effectiveCardData.video_thumbnail : null) ||
+      (effectiveMediaList[0]?.url || null);
+
+    const effectiveTitle = clientTitle || metadataResult.title || trimmedUrl;
+    const effectiveDescription = clientDescription || metadataResult.description || '';
 
     // Initial ai_status is pending_manual; AI context is decoupled and triggered via /bookmarks/:id/ai-context
     const aiStatus = 'pending_manual';
@@ -347,13 +372,13 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
       .insert({
         user_id: userId,
         url: canonicalUrl,
-        title: metadataResult.title || trimmedUrl,
-        description: metadataResult.description || '',
+        title: effectiveTitle,
+        description: effectiveDescription,
         snapshot_url: snapshotUrl,
         logo_url: metadataResult.logo || null,
         site_name: siteName,
         type: platform,
-        card_data: metadataResult.card_data || null,
+        card_data: effectiveCardData && Object.keys(effectiveCardData).length > 0 ? effectiveCardData : null,
         is_article: isArticle,
         ai_status: aiStatus,
       })

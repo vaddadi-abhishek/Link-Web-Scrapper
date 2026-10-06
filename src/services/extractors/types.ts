@@ -17,7 +17,7 @@ export interface XCardData {
     views?: number;
     bookmarks?: number;
   };
-  media: MediaItem[];
+  media: MediaItem[] | null;
   posted_at: string;
   video_thumbnail?: string | null;
 }
