@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { dispatchExtraction } from '../services/extractors';
+import { dispatchExtraction, sanitizeMetrics } from '../services/extractors';
 import { deriveSiteName } from '../utils/siteName';
 import { validateUrlAgainstSSRF } from '../utils/ssrfValidator';
 import { canonicalizeUrl, isResolvableShortlink, resolveShortlink } from '../utils/urlFormatter';
@@ -80,7 +80,12 @@ export const extractMetadataController = async (req: Request, res: Response): Pr
       description: result.description || '',
       logo: result.logo || null,
       site_name: siteName,
-      card_data: result.card_data,
+      card_data: result.card_data
+        ? {
+            ...result.card_data,
+            metrics: sanitizeMetrics((result.card_data as any).metrics),
+          }
+        : null,
     };
 
     // Cache pure metadata response (30-minute TTL)

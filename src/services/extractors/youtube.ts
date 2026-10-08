@@ -1,6 +1,6 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
-import { PlatformExtractor, ExtractionResult, YouTubeCardData } from './types';
+import { PlatformExtractor, ExtractionResult, YouTubeCardData, sanitizeMetrics } from './types';
 import { scrapeWithCheerio } from '../cheerioScraper';
 import { playwrightEngine } from '../playwrightEngine';
 import { resolveUrl } from '../../utils/urlFormatter';
@@ -28,10 +28,10 @@ const buildYouTubeCardData = (
       name: channelName || 'YouTube Channel',
       avatar_url: channelAvatar,
     },
-    metrics: {
+    metrics: sanitizeMetrics({
       views,
       likes,
-    },
+    }),
     video_id: videoId,
     posted_at: publishedAt || new Date().toISOString(),
     video_thumbnail: videoThumbnail || (videoId ? `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg` : null),

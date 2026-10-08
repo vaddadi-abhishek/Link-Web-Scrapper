@@ -1,4 +1,4 @@
-import { ExtractionResult, PlatformExtractor } from './types';
+import { ExtractionResult, PlatformExtractor, sanitizeMetrics } from './types';
 import { redditExtractor } from './reddit';
 import { twitterExtractor } from './twitter';
 import { instagramExtractor } from './instagram';
@@ -86,6 +86,11 @@ export async function dispatchExtraction(
 
   const extractor = getExtractorForUrl(effectiveUrl);
   const result = await extractor.extract(effectiveUrl, html);
+
+  if (result.card_data && typeof result.card_data === 'object') {
+    (result.card_data as any).metrics = sanitizeMetrics((result.card_data as any).metrics);
+  }
+
   const response = {
     result,
     platform: result.type || (result.card_data as any)?.type || extractor.platformKey,

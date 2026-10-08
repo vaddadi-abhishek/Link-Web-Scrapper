@@ -1,6 +1,6 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
-import { PlatformExtractor, ExtractionResult, LinkedInCardData, MediaItem } from './types';
+import { PlatformExtractor, ExtractionResult, LinkedInCardData, MediaItem, ArticleData, sanitizeMetrics } from './types';
 import { playwrightEngine } from '../playwrightEngine';
 import { cleanTitle, cleanDescription } from '../../utils/textCleaner';
 import { parseFormattedNumber } from '../../utils/numberParser';
@@ -865,22 +865,36 @@ export const linkedInExtractor: PlatformExtractor<LinkedInCardData> = {
       finalTitle = authorName ? `${authorName} on LinkedIn` : 'LinkedIn Post';
     }
 
+    const articleData: ArticleData | null =
+      isArticle && articleContent
+        ? {
+            content_html: `<p>${articleContent.replace(/\n\n/g, '</p><p>')}</p>`,
+            content_markdown: articleContent,
+            content_text: articleContent,
+            byline: authorName,
+            excerpt: finalDescription,
+            word_count: wordCount || 0,
+            reading_time_minutes: readingTimeMinutes || 1,
+          }
+        : null;
+
     return {
       title: finalTitle,
       description: finalDescription,
       logo: LINKEDIN_LOGO_URL,
       ogSiteName: resolvedSiteName,
       type: resolvedType,
+      article: articleData,
       card_data: {
         author: {
           name: authorName,
           avatar_url: authorAvatar,
         },
-        metrics: {
+        metrics: sanitizeMetrics({
           reactions,
           comments,
           reposts,
-        },
+        }),
         media: mediaList,
         posted_at: publishedAt || new Date().toISOString(),
         video_thumbnail: videoThumbnail,

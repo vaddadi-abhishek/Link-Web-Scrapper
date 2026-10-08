@@ -1,6 +1,7 @@
 import { chromium, Browser } from 'playwright';
 import { resolveUrl } from '../utils/urlFormatter';
 import { cleanTitle, cleanDescription, isAccessDeniedOrChallenge } from '../utils/textCleaner';
+import net from 'net';
 import { logger } from '../utils/logger';
 import { isPrivateIP } from '../utils/ssrfValidator';
 
@@ -170,7 +171,10 @@ class PlaywrightEngine {
             host === 'localhost' ||
             host.endsWith('.local') ||
             host.endsWith('.internal') ||
-            isPrivateIP(host)
+            host.endsWith('.lan') ||
+            host === '169.254.169.254' ||
+            host === 'metadata.google.internal' ||
+            (net.isIP(host) !== 0 && isPrivateIP(host))
           ) {
             return route.abort('blockedbyclient').catch(() => {});
           }

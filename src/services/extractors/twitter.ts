@@ -1,6 +1,6 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
-import { PlatformExtractor, ExtractionResult, XCardData, MediaItem } from './types';
+import { PlatformExtractor, ExtractionResult, XCardData, MediaItem, ArticleData, sanitizeMetrics } from './types';
 import { resolveUrl } from '../../utils/urlFormatter';
 import { scrapeWithCheerio } from '../cheerioScraper';
 import { playwrightEngine } from '../playwrightEngine';
@@ -86,6 +86,223 @@ export function cleanTweetText(rawText: string): string {
 
   const cleaned = cleanDescription(str);
   return cleaned || '';
+}
+
+interface DraftJsEntity {
+  key?: string | number;
+  id?: string | number;
+  value?: {
+    type?: string;
+    data?: { url?: string };
+  };
+  data?: { url?: string };
+}
+
+interface DraftJsBlock {
+  key?: string;
+  type?: string;
+  text?: string;
+  inlineStyleRanges?: Array<{
+    offset: number;
+    length: number;
+    style: string;
+  }>;
+  entityRanges?: Array<{
+    offset: number;
+    length: number;
+    key: string | number;
+  }>;
+}
+
+interface DraftJsContent {
+  blocks?: DraftJsBlock[];
+  entityMap?: DraftJsEntity[] | Record<string, DraftJsEntity>;
+}
+
+/**
+ * Converts Draft.js blocks (from FxTwitter or X SSR payload) into semantic HTML, Markdown, and plain text.
+ */
+export function convertDraftJsToArticle(
+  content: DraftJsContent | undefined | null,
+  fallbackTitle?: string | null
+): {
+  content_html: string;
+  content_markdown: string;
+  content_text: string;
+  word_count: number;
+  reading_time_minutes: number;
+} {
+  const blocks = content?.blocks || [];
+  const entityMap = content?.entityMap || [];
+
+  const getEntityUrl = (key: string | number): string | null => {
+    if (Array.isArray(entityMap)) {
+      const ent = entityMap.find((e) => String(e.key) === String(key) || String(e.id) === String(key));
+      return ent?.value?.data?.url || ent?.data?.url || null;
+    } else if (typeof entityMap === 'object' && entityMap !== null) {
+      const ent = (entityMap as Record<string, DraftJsEntity>)[String(key)];
+      return ent?.value?.data?.url || ent?.data?.url || null;
+    }
+    return null;
+  };
+
+  const mdLines: string[] = [];
+  const htmlParas: string[] = [];
+  const textLines: string[] = [];
+
+  for (const block of blocks) {
+    const rawText = block.text || '';
+    if (!rawText.trim()) continue;
+
+    const len = rawText.length;
+    const stylesAt = Array.from({ length: len }, () => ({
+      bold: false,
+      italic: false,
+      link: null as string | null,
+    }));
+
+    if (Array.isArray(block.inlineStyleRanges)) {
+      for (const range of block.inlineStyleRanges) {
+        const offset = range.offset || 0;
+        const length = range.length || 0;
+        const style = (range.style || '').toLowerCase();
+        for (let i = offset; i < Math.min(len, offset + length); i++) {
+          if (style === 'bold') stylesAt[i].bold = true;
+          if (style === 'italic') stylesAt[i].italic = true;
+        }
+      }
+    }
+
+    if (Array.isArray(block.entityRanges)) {
+      for (const er of block.entityRanges) {
+        const offset = er.offset || 0;
+        const length = er.length || 0;
+        const url = getEntityUrl(er.key);
+        if (url) {
+          for (let i = offset; i < Math.min(len, offset + length); i++) {
+            stylesAt[i].link = url;
+          }
+        }
+      }
+    }
+
+    let htmlLine = '';
+    let mdLine = '';
+
+    let curBold = false;
+    let curItalic = false;
+    let curLink: string | null = null;
+
+    for (let i = 0; i < len; i++) {
+      const char = rawText[i];
+      const s = stylesAt[i];
+
+      if (curLink && curLink !== s.link) {
+        htmlLine += '</a>';
+        mdLine += `](${curLink})`;
+        curLink = null;
+      }
+      if (curItalic && !s.italic) {
+        htmlLine += '</em>';
+        mdLine += '*';
+        curItalic = false;
+      }
+      if (curBold && !s.bold) {
+        htmlLine += '</strong>';
+        mdLine += '**';
+        curBold = false;
+      }
+
+      if (!curBold && s.bold) {
+        htmlLine += '<strong>';
+        mdLine += '**';
+        curBold = true;
+      }
+      if (!curItalic && s.italic) {
+        htmlLine += '<em>';
+        mdLine += '*';
+        curItalic = true;
+      }
+      if (!curLink && s.link) {
+        htmlLine += `<a href="${s.link}" target="_blank" rel="noopener noreferrer">`;
+        mdLine += '[';
+        curLink = s.link;
+      }
+
+      const safeChar =
+        char === '<'
+          ? '&lt;'
+          : char === '>'
+          ? '&gt;'
+          : char === '&'
+          ? '&amp;'
+          : char;
+      htmlLine += safeChar;
+      mdLine += char;
+    }
+
+    if (curLink) {
+      htmlLine += '</a>';
+      mdLine += `](${curLink})`;
+    }
+    if (curItalic) {
+      htmlLine += '</em>';
+      mdLine += '*';
+    }
+    if (curBold) {
+      htmlLine += '</strong>';
+      mdLine += '**';
+    }
+
+    textLines.push(rawText);
+
+    const bType = block.type || 'unstyled';
+    const isHeaderCandidate =
+      (block.inlineStyleRanges || []).some(
+        (r) =>
+          r.style?.toLowerCase() === 'bold' &&
+          r.offset === 0 &&
+          r.length >= rawText.length - 2
+      ) && rawText.length < 120;
+
+    if (bType === 'header-one' || bType === 'header-1') {
+      mdLines.push(`## ${mdLine}`);
+      htmlParas.push(`<h2>${htmlLine}</h2>`);
+    } else if (bType === 'header-two' || bType === 'header-2' || isHeaderCandidate) {
+      const cleanMd = mdLine.replace(/^\*\*|\*\*$/g, '');
+      const cleanHtml = htmlLine.replace(/^<strong>|<\/strong>$/g, '');
+      mdLines.push(`### ${cleanMd}`);
+      htmlParas.push(`<h3>${cleanHtml}</h3>`);
+    } else if (bType === 'blockquote') {
+      mdLines.push(`> ${mdLine}`);
+      htmlParas.push(`<blockquote><p>${htmlLine}</p></blockquote>`);
+    } else if (bType === 'unordered-list-item') {
+      mdLines.push(`- ${mdLine}`);
+      htmlParas.push(`<li>${htmlLine}</li>`);
+    } else if (bType === 'ordered-list-item') {
+      mdLines.push(`1. ${mdLine}`);
+      htmlParas.push(`<li>${htmlLine}</li>`);
+    } else if (bType === 'code-block') {
+      mdLines.push(`\`\`\`\n${rawText}\n\`\`\``);
+      htmlParas.push(`<pre><code>${htmlLine}</code></pre>`);
+    } else {
+      mdLines.push(mdLine);
+      htmlParas.push(`<p>${htmlLine}</p>`);
+    }
+  }
+
+  const fullText = textLines.join('\n\n');
+  const words = fullText.split(/\s+/).filter(Boolean);
+  const wordCount = words.length;
+  const readingTimeMinutes = Math.max(1, Math.ceil(wordCount / 200));
+
+  return {
+    content_html: htmlParas.join('\n'),
+    content_markdown: mdLines.join('\n\n'),
+    content_text: fullText,
+    word_count: wordCount,
+    reading_time_minutes: readingTimeMinutes,
+  };
 }
 
 /**
@@ -223,7 +440,50 @@ async function tryDirectTwitterScrape(targetUrl: string): Promise<ExtractionResu
     }
 
     const cleanDesc = cleanTweetText(ogDesc);
-    const title = `${authorName} (${handle}) on X`;
+    let title = `${authorName} (${handle}) on X`;
+    let description = cleanDesc;
+
+    // Detect X Article in direct scrape HTML
+    const isArticle = html.includes('ArticleEntity') || html.includes('/i/article/');
+    let articleData: ArticleData | null = null;
+    let articleContent: string | null = null;
+    let articleWordCount: number | null = null;
+    let articleReadingTime: number | null = null;
+
+    if (isArticle) {
+      if (ogDesc && ogDesc.trim()) {
+        const cleanedOg = cleanTitle(ogDesc);
+        if (cleanedOg) title = cleanedOg;
+      }
+
+      // Check for content_state blocks inside SSR script
+      const contentStateMatch = html.match(/content_state:\$R\[\d+\]=\{blocks:\$R\[\d+\]=\[([\s\S]*?)\]\}/);
+      if (contentStateMatch) {
+        const textMatches = Array.from(contentStateMatch[1].matchAll(/text:"([^"\\]*(?:\\.[^"\\]*)*)"/g));
+        if (textMatches.length > 0) {
+          const extractedTexts = textMatches.map((m) => {
+            try {
+              return JSON.parse(`"${m[1]}"`);
+            } catch {
+              return m[1];
+            }
+          });
+          articleContent = extractedTexts.join('\n\n');
+          const words = articleContent.split(/\s+/).filter(Boolean).length;
+          articleWordCount = words;
+          articleReadingTime = Math.max(1, Math.ceil(words / 200));
+          articleData = {
+            content_html: extractedTexts.map((t) => `<p>${t}</p>`).join('\n'),
+            content_markdown: extractedTexts.join('\n\n'),
+            content_text: articleContent,
+            byline: authorName,
+            excerpt: cleanDesc,
+            word_count: words,
+            reading_time_minutes: articleReadingTime,
+          };
+        }
+      }
+    }
 
     // Ensure we have resolved an avatar URL and verified status (fall back to author profile resolution)
     let finalAvatar = upgradeAvatarUrl(avatar || (ogImage && ogImage.includes('profile_images') ? ogImage : null));
@@ -233,11 +493,15 @@ async function tryDirectTwitterScrape(targetUrl: string): Promise<ExtractionResu
       if (!verified) verified = profile.verified;
     }
 
+    const resolvedType = isArticle ? 'article' : undefined;
+
     return {
       title,
-      description: cleanDesc,
+      description,
       logo: X_LOGO_URL,
       ogSiteName: 'X (formerly Twitter)',
+      type: resolvedType,
+      article: articleData,
       card_data: {
         author: {
           name: authorName,
@@ -245,10 +509,19 @@ async function tryDirectTwitterScrape(targetUrl: string): Promise<ExtractionResu
           avatar_url: finalAvatar,
           verified,
         },
-        metrics: replies !== undefined ? { replies } : {},
+        metrics: sanitizeMetrics(replies !== undefined ? { replies } : null),
         media: media.length > 0 ? media : null,
         posted_at: postedAt || new Date().toISOString(),
         video_thumbnail: null,
+        ...(isArticle
+          ? {
+              type: 'article',
+              page_intent: 'article',
+              article_content: articleContent,
+              word_count: articleWordCount,
+              reading_time_minutes: articleReadingTime,
+            }
+          : {}),
       },
     };
   } catch {
@@ -450,7 +723,56 @@ export function parseTwitterHtml(rawHtml: string, targetUrl: string): Extraction
     const timeEl = findIn('time[datetime]').first();
     const postedAt = timeEl.attr('datetime') || new Date().toISOString();
 
-    const title = `${authorName} (${handle}) on X`;
+    let title = `${authorName} (${handle}) on X`;
+    let finalDescription = description;
+
+    // 8. Article detection in HTML DOM & SSR state
+    let isArticle = false;
+    let articleData: ArticleData | null = null;
+    let articleContent: string | null = null;
+    let articleWordCount: number | null = null;
+    let articleReadingTime: number | null = null;
+
+    const articleCardLink = findIn('a[href*="/i/article/"], a[href*="/article/"]').first();
+    const hasArticleEntity = rawHtml.includes('ArticleEntity') || rawHtml.includes('/i/article/');
+
+    if (articleCardLink.length > 0 || hasArticleEntity) {
+      isArticle = true;
+      const headlineEl = findIn('[data-testid*="article"] h1, [data-testid*="article"] h2, h1, [data-testid="card.layoutLarge.detail"] div').first();
+      if (headlineEl.length > 0) {
+        const cleanedHeadline = cleanTitle(headlineEl.text());
+        if (cleanedHeadline) title = cleanedHeadline;
+      }
+
+      // Check if SSR payload contains Draft.js blocks
+      const contentStateMatch = rawHtml.match(/content_state:\$R\[\d+\]=\{blocks:\$R\[\d+\]=\[([\s\S]*?)\]\}/);
+      if (contentStateMatch) {
+        const textMatches = Array.from(contentStateMatch[1].matchAll(/text:"([^"\\]*(?:\\.[^"\\]*)*)"/g));
+        if (textMatches.length > 0) {
+          const extractedTexts = textMatches.map((m) => {
+            try {
+              return JSON.parse(`"${m[1]}"`);
+            } catch {
+              return m[1];
+            }
+          });
+          articleContent = extractedTexts.join('\n\n');
+          const words = articleContent.split(/\s+/).filter(Boolean).length;
+          articleWordCount = words;
+          articleReadingTime = Math.max(1, Math.ceil(words / 200));
+          articleData = {
+            content_html: extractedTexts.map((t) => `<p>${t}</p>`).join('\n'),
+            content_markdown: extractedTexts.join('\n\n'),
+            content_text: articleContent,
+            byline: authorName,
+            excerpt: description,
+            word_count: words,
+            reading_time_minutes: articleReadingTime,
+          };
+        }
+      }
+    }
+
     const hasVideo = mediaList.some((m) => m.type === 'video');
     const videoThumbnail = hasVideo ? mediaList[0]?.url || null : null;
 
@@ -459,11 +781,15 @@ export function parseTwitterHtml(rawHtml: string, targetUrl: string): Extraction
       return null;
     }
 
+    const resolvedType = isArticle ? 'article' : undefined;
+
     return {
       title,
-      description,
+      description: finalDescription,
       logo: X_LOGO_URL,
       ogSiteName: 'X (formerly Twitter)',
+      type: resolvedType,
+      article: articleData,
       card_data: {
         author: {
           name: authorName,
@@ -475,6 +801,15 @@ export function parseTwitterHtml(rawHtml: string, targetUrl: string): Extraction
         media: mediaList.length > 0 ? mediaList : null,
         posted_at: postedAt,
         video_thumbnail: videoThumbnail,
+        ...(isArticle
+          ? {
+              type: 'article',
+              page_intent: 'article',
+              article_content: articleContent,
+              word_count: articleWordCount,
+              reading_time_minutes: articleReadingTime,
+            }
+          : {}),
       },
     };
   } catch (error) {
@@ -519,13 +854,29 @@ async function tryFxTwitterApi(tweetId: string, targetUrl: string): Promise<Extr
 
     const authorName = tweet.author.name || 'User';
     const handle = tweet.author.screen_name ? `@${tweet.author.screen_name}` : '@user';
-    const title = `${authorName} (${handle}) on X`;
-    const description = cleanTweetText(tweet.text || '');
+    let title = `${authorName} (${handle}) on X`;
+    let description = cleanTweetText(tweet.text || '');
+
+    const isArticle = Boolean(tweet.article);
+    let articleData: ArticleData | null = null;
+    let articleContent: string | null = null;
+    let articleWordCount: number | null = null;
+    let articleReadingTime: number | null = null;
+    let articleTitle: string | null = null;
 
     const mediaList: MediaItem[] = [];
+
+    // Attach article cover image if available
+    if (isArticle && tweet.article?.cover_media?.media_info?.original_img_url) {
+      const coverUrl = tweet.article.cover_media.media_info.original_img_url;
+      if (typeof coverUrl === 'string') {
+        mediaList.push({ type: 'image', url: coverUrl });
+      }
+    }
+
     if (Array.isArray(tweet.media?.photos)) {
       tweet.media.photos.forEach((photo: Record<string, unknown>) => {
-        if (typeof photo?.url === 'string') {
+        if (typeof photo?.url === 'string' && !mediaList.some((m) => m.url === photo.url)) {
           mediaList.push({ type: 'image', url: photo.url });
         }
       });
@@ -563,6 +914,54 @@ async function tryFxTwitterApi(tweetId: string, targetUrl: string): Promise<Extr
             });
           }
         });
+      }
+    }
+
+    // Process article details if present
+    if (isArticle && tweet.article) {
+      if (tweet.article.title && typeof tweet.article.title === 'string') {
+        articleTitle = cleanTitle(tweet.article.title);
+        if (articleTitle) {
+          title = articleTitle;
+        }
+      }
+      if (tweet.article.preview_text && typeof tweet.article.preview_text === 'string') {
+        const cleanedDesc = cleanDescription(tweet.article.preview_text);
+        if (cleanedDesc) {
+          description = cleanedDesc;
+        }
+      }
+
+      if (tweet.article.content && Array.isArray(tweet.article.content.blocks) && tweet.article.content.blocks.length > 0) {
+        const converted = convertDraftJsToArticle(tweet.article.content, articleTitle || title);
+        articleContent = converted.content_text;
+        articleWordCount = converted.word_count;
+        articleReadingTime = converted.reading_time_minutes;
+
+        articleData = {
+          content_html: converted.content_html,
+          content_markdown: converted.content_markdown,
+          content_text: converted.content_text,
+          byline: authorName,
+          excerpt: tweet.article.preview_text || description,
+          word_count: converted.word_count,
+          reading_time_minutes: converted.reading_time_minutes,
+        };
+      } else if (tweet.article.preview_text) {
+        articleContent = tweet.article.preview_text;
+        const words = typeof articleContent === 'string' ? articleContent.split(/\s+/).filter(Boolean).length : 0;
+        articleWordCount = words;
+        articleReadingTime = Math.max(1, Math.ceil(words / 200));
+
+        articleData = {
+          content_html: `<p>${tweet.article.preview_text}</p>`,
+          content_markdown: tweet.article.preview_text,
+          content_text: tweet.article.preview_text,
+          byline: authorName,
+          excerpt: tweet.article.preview_text,
+          word_count: words,
+          reading_time_minutes: articleReadingTime,
+        };
       }
     }
 
@@ -606,11 +1005,15 @@ async function tryFxTwitterApi(tweetId: string, targetUrl: string): Promise<Extr
       if (!verified) verified = profile.verified;
     }
 
+    const resolvedType = isArticle ? 'article' : undefined;
+
     return {
       title,
       description,
       logo: X_LOGO_URL,
       ogSiteName: 'X (formerly Twitter)',
+      type: resolvedType,
+      article: articleData,
       card_data: {
         author: {
           name: authorName,
@@ -618,10 +1021,139 @@ async function tryFxTwitterApi(tweetId: string, targetUrl: string): Promise<Extr
           avatar_url: avatarUrl,
           verified,
         },
-        metrics,
+        metrics: sanitizeMetrics(metrics),
         media: mediaList.length > 0 ? mediaList : null,
         posted_at: postedAt,
         video_thumbnail: videoThumbnail,
+        snapshot,
+        ...(isArticle
+          ? {
+              type: 'article',
+              page_intent: 'article',
+              article_content: articleContent,
+              word_count: articleWordCount,
+              reading_time_minutes: articleReadingTime,
+            }
+          : {}),
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Direct Syndication API for Twitter/X — fast CDN-cached metadata with explicit article object.
+ */
+async function tryTwitterSyndicationApi(tweetId: string, targetUrl: string): Promise<ExtractionResult<XCardData> | null> {
+  try {
+    const res = await axios.get(`https://cdn.syndication.twimg.com/tweet-result?id=${tweetId}&token=1`, {
+      timeout: 3500,
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': DEFAULT_USER_AGENT,
+      },
+      validateStatus: (status) => status === 200,
+    });
+
+    const data = res.data;
+    if (!data || !data.user) {
+      return null;
+    }
+
+    const authorName = data.user.name || 'User';
+    const handle = data.user.screen_name ? `@${data.user.screen_name}` : '@user';
+    let title = `${authorName} (${handle}) on X`;
+    let description = cleanTweetText(data.text || '');
+
+    const isArticle = Boolean(data.article);
+    let articleData: ArticleData | null = null;
+    let articleContent: string | null = null;
+    let articleWordCount: number | null = null;
+    let articleReadingTime: number | null = null;
+
+    const mediaList: MediaItem[] = [];
+    const coverUrl = data.article?.cover_media?.media_info?.original_img_url || null;
+    if (coverUrl && typeof coverUrl === 'string') {
+      mediaList.push({ type: 'image', url: coverUrl });
+    }
+
+    if (Array.isArray(data.photos)) {
+      data.photos.forEach((p: Record<string, unknown>) => {
+        if (typeof p?.url === 'string' && !mediaList.some((m) => m.url === p.url)) {
+          mediaList.push({ type: 'image', url: p.url });
+        }
+      });
+    }
+
+    if (isArticle && data.article) {
+      if (data.article.title && typeof data.article.title === 'string') {
+        const cleanedArtTitle = cleanTitle(data.article.title);
+        if (cleanedArtTitle) title = cleanedArtTitle;
+      }
+      if (data.article.preview_text && typeof data.article.preview_text === 'string') {
+        const preview = cleanDescription(data.article.preview_text) || '';
+        description = preview;
+        articleContent = preview;
+        const words = preview.split(/\s+/).filter(Boolean).length;
+        articleWordCount = words;
+        articleReadingTime = Math.max(1, Math.ceil(words / 200));
+
+        articleData = {
+          content_html: `<p>${preview}</p>`,
+          content_markdown: preview,
+          content_text: preview,
+          byline: authorName,
+          excerpt: preview,
+          word_count: words,
+          reading_time_minutes: articleReadingTime,
+        };
+      }
+    }
+
+    const metrics: XCardData['metrics'] = {};
+    if (data.favorite_count !== undefined && data.favorite_count !== null) metrics.likes = parseMetricValue(data.favorite_count);
+    if (data.conversation_count !== undefined && data.conversation_count !== null) metrics.replies = parseMetricValue(data.conversation_count);
+
+    let avatarUrl = upgradeAvatarUrl(data.user.profile_image_url_https || data.user.profile_image_url);
+    let verified = Boolean(data.user.verified || data.user.is_blue_verified);
+
+    if ((!avatarUrl || !verified) && handle && handle !== '@user') {
+      const profile = await resolveAuthorProfile(handle);
+      if (!avatarUrl && profile.avatar_url) avatarUrl = profile.avatar_url;
+      if (!verified) verified = profile.verified;
+    }
+
+    const resolvedType = isArticle ? 'article' : undefined;
+
+    return {
+      title,
+      description,
+      logo: X_LOGO_URL,
+      ogSiteName: 'X (formerly Twitter)',
+      type: resolvedType,
+      article: articleData,
+      card_data: {
+        author: {
+          name: authorName,
+          handle,
+          avatar_url: avatarUrl,
+          verified,
+        },
+        metrics: sanitizeMetrics(metrics),
+        media: mediaList.length > 0 ? mediaList : null,
+        posted_at: data.created_at ? new Date(data.created_at).toISOString() : new Date().toISOString(),
+        video_thumbnail: null,
+        snapshot: mediaList[0]?.url || null,
+        ...(isArticle
+          ? {
+              type: 'article',
+              page_intent: 'article',
+              article_content: articleContent,
+              word_count: articleWordCount,
+              reading_time_minutes: articleReadingTime,
+            }
+          : {}),
       },
     };
   } catch {
@@ -729,7 +1261,7 @@ async function tryVxTwitterApi(tweetId: string, targetUrl: string): Promise<Extr
           avatar_url: avatarUrl,
           verified,
         },
-        metrics,
+        metrics: sanitizeMetrics(metrics),
         media: mediaList.length > 0 ? mediaList : null,
         posted_at: data.date ? new Date(data.date).toISOString() : new Date().toISOString(),
         video_thumbnail: videoThumbnail,
@@ -795,7 +1327,7 @@ async function tryTwitterOEmbed(targetUrl: string): Promise<ExtractionResult<XCa
           avatar_url: avatarUrl,
           verified,
         },
-        metrics: {},
+        metrics: null,
         media: null,
         posted_at: postedAt,
       },
@@ -830,6 +1362,9 @@ export const twitterExtractor: PlatformExtractor<XCardData> = {
       const fxResult = await tryFxTwitterApi(tweetId, targetUrl);
       if (fxResult) return fxResult;
 
+      const syndicationResult = await tryTwitterSyndicationApi(tweetId, targetUrl);
+      if (syndicationResult) return syndicationResult;
+
       const vxResult = await tryVxTwitterApi(tweetId, targetUrl);
       if (vxResult) return vxResult;
     }
@@ -841,8 +1376,8 @@ export const twitterExtractor: PlatformExtractor<XCardData> = {
     const hasFullMetricsAndMedia =
       directResult &&
       directResult.card_data.author.avatar_url &&
-      directResult.card_data.metrics.likes !== undefined &&
-      (directResult.card_data.metrics.reposts !== undefined || directResult.card_data.metrics.views !== undefined);
+      directResult.card_data.metrics?.likes !== undefined &&
+      (directResult.card_data.metrics?.reposts !== undefined || directResult.card_data.metrics?.views !== undefined);
 
     if (hasFullMetricsAndMedia) {
       return directResult;
@@ -861,7 +1396,7 @@ export const twitterExtractor: PlatformExtractor<XCardData> = {
 
       if (pwData.html) {
         const domResult = parseTwitterHtml(pwData.html, targetUrl);
-        if (domResult && (domResult.card_data.metrics.likes !== undefined || (domResult.card_data.media && domResult.card_data.media.length > 0))) {
+        if (domResult && (domResult.card_data.metrics?.likes !== undefined || (domResult.card_data.media && domResult.card_data.media.length > 0))) {
           return domResult;
         }
       }
@@ -881,7 +1416,7 @@ export const twitterExtractor: PlatformExtractor<XCardData> = {
       const cheerioData = await scrapeWithCheerio(targetUrl);
       if (cheerioData?.rawHtml) {
         const domResult = parseTwitterHtml(cheerioData.rawHtml, targetUrl);
-        if (domResult && (domResult.card_data.author.avatar_url || domResult.card_data.metrics.likes !== undefined)) {
+        if (domResult && (domResult.card_data.author.avatar_url || domResult.card_data.metrics?.likes !== undefined)) {
           return domResult;
         }
       }
@@ -908,7 +1443,7 @@ export const twitterExtractor: PlatformExtractor<XCardData> = {
           avatar_url: null,
           verified: false,
         },
-        metrics: {},
+        metrics: null,
         media: null,
         posted_at: new Date().toISOString(),
       },

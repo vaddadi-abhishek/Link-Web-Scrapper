@@ -1,13 +1,13 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
-import { PlatformExtractor, ExtractionResult, FacebookCardData, MediaItem } from './types';
+import { PlatformExtractor, ExtractionResult, FacebookCardData, MediaItem, sanitizeMetrics } from './types';
 import { playwrightEngine } from '../playwrightEngine';
 import { cleanDescription } from '../../utils/textCleaner';
 import { parseFormattedNumber } from '../../utils/numberParser';
 import { avatarCache } from '../../utils/cache';
 import { logger } from '../../utils/logger';
 
-const FACEBOOK_LOGO_URL = 'https://static.xx.fbcdn.net/rsrc.php/yD/r/d4ZIVX-5CUn.ico';
+const FACEBOOK_LOGO_URL = 'https://www.facebook.com/favicon.ico';
 
 function isFacebookReelOrVideo(targetUrl: string): boolean {
   return /\/(?:reels?|share\/[rv]|videos?|watch)/i.test(targetUrl);
@@ -302,7 +302,7 @@ function extractFacebookMetrics(html: string, combinedText?: string): FacebookCa
     }
   }
 
-  return { likes, comments, shares };
+  return sanitizeMetrics({ likes, comments, shares });
 }
 
 function extractFacebookFullDescription(html: string, ogDesc?: string | null): string | null {
@@ -502,7 +502,7 @@ export const facebookExtractor: PlatformExtractor<FacebookCardData> = {
     let publishedAt: string | null = null;
     let finalUrl: string | null = null;
     let rawHtml = '';
-    let metrics: FacebookCardData['metrics'] = { likes: 0, comments: 0, shares: 0 };
+    let metrics: FacebookCardData['metrics'] = null;
     const discoveredImages: string[] = [];
 
     // -----------------------------------------------------------
@@ -752,7 +752,7 @@ export const facebookExtractor: PlatformExtractor<FacebookCardData> = {
               }
             });
           }
-          if (!metrics.likes && !metrics.comments && !metrics.shares && pwResult.customData.html) {
+          if (!metrics?.likes && !metrics?.comments && !metrics?.shares && pwResult.customData.html) {
             metrics = extractFacebookMetrics(pwResult.customData.html, pwResult.customData.bodyText);
           }
         }
@@ -760,8 +760,8 @@ export const facebookExtractor: PlatformExtractor<FacebookCardData> = {
     }
 
     // For Reels and Videos, Facebook SSR payloads omit share counts.
-    // If shares is 0, fetch live action bar metrics via Playwright evaluator.
-    if (isVideo && metrics.shares === 0) {
+    // If shares is 0 or null, fetch live action bar metrics via Playwright evaluator.
+    if (isVideo && (!metrics?.shares)) {
       try {
         const pwTarget = finalUrl || targetUrl;
         const pwMetrics = await playwrightEngine.scrape<any>(pwTarget, {
@@ -830,14 +830,20 @@ export const facebookExtractor: PlatformExtractor<FacebookCardData> = {
         if (pwMetrics.customData?.shares) {
           const parsedShares = parseFormattedNumber(pwMetrics.customData.shares);
           if (parsedShares > 0) {
-            metrics.shares = parsedShares;
+            metrics = { ...(metrics || { likes: 0, comments: 0, shares: 0 }), shares: parsedShares };
           }
         }
-        if (!metrics.likes && pwMetrics.customData?.likes) {
-          metrics.likes = parseFormattedNumber(pwMetrics.customData.likes);
+        if (pwMetrics.customData?.likes) {
+          const parsedLikes = parseFormattedNumber(pwMetrics.customData.likes);
+          if (parsedLikes > 0 && (!metrics || !metrics.likes)) {
+            metrics = { ...(metrics || { likes: 0, comments: 0, shares: 0 }), likes: parsedLikes };
+          }
         }
-        if (!metrics.comments && pwMetrics.customData?.comments) {
-          metrics.comments = parseFormattedNumber(pwMetrics.customData.comments);
+        if (pwMetrics.customData?.comments) {
+          const parsedComments = parseFormattedNumber(pwMetrics.customData.comments);
+          if (parsedComments > 0 && (!metrics || !metrics.comments)) {
+            metrics = { ...(metrics || { likes: 0, comments: 0, shares: 0 }), comments: parsedComments };
+          }
         }
       } catch {}
     }
@@ -929,7 +935,7 @@ export const facebookExtractor: PlatformExtractor<FacebookCardData> = {
           name: authorName,
           avatar_url: authorAvatar,
         },
-        metrics,
+        metrics: sanitizeMetrics(metrics),
         media,
         posted_at: publishedAt || new Date().toISOString(),
         video_thumbnail: videoThumbnail,

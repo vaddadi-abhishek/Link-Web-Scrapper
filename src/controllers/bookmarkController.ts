@@ -1,6 +1,6 @@
 import { Response } from 'express';
 import { AuthenticatedRequest } from '../middleware/authMiddleware';
-import { dispatchExtraction, ExtractionResult } from '../services/extractors';
+import { dispatchExtraction, ExtractionResult, sanitizeMetrics } from '../services/extractors';
 import { ArticleData } from '../services/extractors/types';
 import { deriveSiteName } from '../utils/siteName';
 import { validateUrlAgainstSSRF } from '../utils/ssrfValidator';
@@ -245,6 +245,8 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
       canonicalUrl.replace('https://www.linkedin.com', 'https://linkedin.com') + '/',
       canonicalUrl.replace('/reel/', '/reels/'),
       canonicalUrl.replace('/reels/', '/reel/'),
+      canonicalUrl.replace('/p/', '/reel/'),
+      canonicalUrl.replace('/reel/', '/p/'),
     ])).filter(Boolean);
 
     const linkedInPostId = extractLinkedInPostId(canonicalUrl) || extractLinkedInPostId(effectiveUrl) || extractLinkedInPostId(trimmedUrl);
@@ -328,8 +330,7 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
     const metadataResult = result as ExtractionResult;
     const siteName = deriveSiteName(canonicalUrl, result.ogSiteName);
 
-    const extractedArticle = (result as ExtractionResult).article || null;
-    const isArticle = Boolean(extractedArticle);
+    let extractedArticle = (result as ExtractionResult).article || null;
 
     const clientCardData = typeof req.body?.card_data === 'object' && req.body?.card_data !== null
       ? (req.body.card_data as Record<string, unknown>)
@@ -348,10 +349,32 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
       ? (result.card_data as Record<string, unknown>)
       : {};
 
+    // Synthesize ArticleData if article_content is present in card_data but article was not set at root
+    if (!extractedArticle && typeof cardDataObj.article_content === 'string' && cardDataObj.article_content.trim()) {
+      const artText = cardDataObj.article_content.trim();
+      const words = typeof cardDataObj.word_count === 'number' ? cardDataObj.word_count : artText.split(/\s+/).filter(Boolean).length;
+      const readingTime = typeof cardDataObj.reading_time_minutes === 'number' ? cardDataObj.reading_time_minutes : Math.max(1, Math.ceil(words / 200));
+      extractedArticle = {
+        content_html: `<p>${artText.replace(/\n\n/g, '</p><p>')}</p>`,
+        content_markdown: artText,
+        content_text: artText,
+        byline: (cardDataObj.author as { name?: string })?.name || null,
+        excerpt: metadataResult.description || null,
+        word_count: words,
+        reading_time_minutes: readingTime,
+      };
+    }
+
+    const isArticle = Boolean(extractedArticle);
+
     // Merge server extraction with client-provided data (e.g. from Mindspace browser extension)
     const effectiveCardData = clientCardData && Object.keys(clientCardData).length > 0
       ? { ...cardDataObj, ...clientCardData }
       : cardDataObj;
+
+    if ('metrics' in effectiveCardData || 'metrics' in cardDataObj) {
+      effectiveCardData.metrics = sanitizeMetrics(effectiveCardData.metrics as Record<string, unknown>);
+    }
 
     const effectiveMediaList = Array.isArray(effectiveCardData.media) ? (effectiveCardData.media as Array<{ url?: string }>) : [];
     const snapshotUrl =

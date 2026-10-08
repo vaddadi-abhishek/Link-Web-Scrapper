@@ -1,13 +1,14 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
-import { PlatformExtractor, ExtractionResult, InstagramCardData, MediaItem } from './types';
+import { PlatformExtractor, ExtractionResult, InstagramCardData, MediaItem, sanitizeMetrics } from './types';
 import { scrapeWithCheerio } from '../cheerioScraper';
 import { playwrightEngine } from '../playwrightEngine';
 import { resolveUrl } from '../../utils/urlFormatter';
 import { cleanTitle } from '../../utils/textCleaner';
 import { parseFormattedNumber } from '../../utils/numberParser';
+import { logger } from '../../utils/logger';
 
-const INSTAGRAM_LOGO_URL = 'https://static.cdninstagram.com/rsrc.php/v3/yI/r/VsNE-OHk_8a.png';
+const INSTAGRAM_LOGO_URL = 'https://www.instagram.com/favicon.ico';
 
 function cleanInstagramText(raw: string | null): string {
   if (!raw) return '';
@@ -138,9 +139,123 @@ function isAvatarUrl(url: string): boolean {
   );
 }
 
+function isInstagramProfileUrl(targetUrl: string): boolean {
+  const clean = targetUrl.replace(/^https?:\/\/(?:www\.)?instagram\.com\//i, '').split(/[?#]/)[0].trim();
+  const segments = clean.split('/').filter(Boolean);
+  if (segments.length === 1) {
+    const slug = segments[0].toLowerCase();
+    const systemSlugs = [
+      'p', 'reel', 'reels', 'tv', 'stories', 'explore', 'direct',
+      'accounts', 'developer', 'about', 'legal', 'help', 'privacy',
+      'emails', 'graphql', 'api'
+    ];
+    return !systemSlugs.includes(slug);
+  }
+  return false;
+}
+
+function extractInstagramUsernameFromProfileUrl(targetUrl: string): string | null {
+  const clean = targetUrl.replace(/^https?:\/\/(?:www\.)?instagram\.com\//i, '').split(/[?#]/)[0].trim();
+  const segments = clean.split('/').filter(Boolean);
+  if (segments.length === 1) {
+    const slug = segments[0];
+    const systemSlugs = [
+      'p', 'reel', 'reels', 'tv', 'stories', 'explore', 'direct',
+      'accounts', 'developer', 'about', 'legal', 'help', 'privacy',
+      'emails', 'graphql', 'api'
+    ];
+    if (!systemSlugs.includes(slug.toLowerCase())) {
+      return slug;
+    }
+  }
+  return null;
+}
+
+function extractInstagramProfileMediaFromHtml(html: string): MediaItem[] {
+  if (!html) return [];
+  const media: MediaItem[] = [];
+  const seen = new Set<string>();
+
+  // 1. Script tag: polaris_ordered_timeline_connection or polaris_timeline_connection
+  const scriptMatches = [...html.matchAll(/<script[^>]*type=["']application\/json["'][^>]*>([\s\S]*?)<\/script>/gi)];
+  for (const s of scriptMatches) {
+    if (s[1].includes('polaris_ordered_timeline_connection') || s[1].includes('polaris_timeline_connection')) {
+      try {
+        const json = JSON.parse(s[1]);
+        const findConnection = (obj: any): any => {
+          if (!obj || typeof obj !== 'object') return null;
+          if (obj.polaris_ordered_timeline_connection) return obj.polaris_ordered_timeline_connection;
+          if (obj.polaris_timeline_connection) return obj.polaris_timeline_connection;
+          for (const k of Object.keys(obj)) {
+            const res = findConnection(obj[k]);
+            if (res) return res;
+          }
+          return null;
+        };
+        const conn = findConnection(json);
+        if (conn && Array.isArray(conn.edges)) {
+          for (const edge of conn.edges) {
+            const uri = edge.node?.display_uri || edge.node?.image_versions2?.candidates?.[0]?.url;
+            if (uri) {
+              const cleaned = cleanMediaUrl(uri);
+              if (cleaned && !seen.has(cleaned) && !isAvatarUrl(cleaned)) {
+                seen.add(cleaned);
+                media.push({ type: 'image', url: cleaned });
+                if (media.length >= 6) return media;
+              }
+            }
+          }
+        }
+      } catch {
+        // Continue if parsing fails
+      }
+    }
+  }
+
+  // 2. DOM Cheerio Extraction: Post links and grid containers in visual order
+  const $ = cheerio.load(html);
+  const profileGridSelectors = [
+    'a[href*="/p/"] img',
+    'a[href*="/reel/"] img',
+    'div._aagu img',
+    'div._aagv img',
+    'div.xg7h5cd img',
+    'div._ac7v img',
+    'div.x1i5p2am img',
+    'div._a6hd img',
+    'article img',
+    'main img',
+  ];
+
+  $(profileGridSelectors.join(', ')).each((_, el) => {
+    if (media.length >= 6) return;
+    const src = $(el).attr('src') || $(el).attr('data-src');
+    if (!src) return;
+    const cleaned = cleanMediaUrl(src);
+    if (!cleaned || seen.has(cleaned) || isAvatarUrl(cleaned)) return;
+    seen.add(cleaned);
+    media.push({ type: 'image', url: cleaned });
+  });
+
+  // 3. Fallback for any img tag in provided HTML snippet
+  if (media.length < 6) {
+    $('img').each((_, el) => {
+      if (media.length >= 6) return;
+      const src = $(el).attr('src') || $(el).attr('data-src');
+      if (!src) return;
+      const cleaned = cleanMediaUrl(src);
+      if (!cleaned || seen.has(cleaned) || isAvatarUrl(cleaned)) return;
+      seen.add(cleaned);
+      media.push({ type: 'image', url: cleaned });
+    });
+  }
+
+  return media;
+}
+
 export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
   platformKey: 'instagram',
-  async extract(targetUrl: string): Promise<ExtractionResult<InstagramCardData>> {
+  async extract(targetUrl: string, requestHtml?: string): Promise<ExtractionResult<InstagramCardData>> {
     // Normalize /reels/ to /reel/ for consistent crawler and embed resolution
     const normalizedUrl = targetUrl.replace(/\/reels\//i, '/reel/');
 
@@ -152,6 +267,8 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
     let image = cheerioData?.image || null;
     const ogSiteName = cheerioData?.ogSiteName || 'Instagram';
     let publishedAt: string | null = cheerioData?.publishedAt || null;
+    const logo = cheerioData?.logo || INSTAGRAM_LOGO_URL;
+    let isVerified = false;
 
     const twitterTitle = cheerioData?.twitterTitle;
     if (twitterTitle) {
@@ -171,10 +288,15 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
     let username = 'unknown';
     let displayName = title || 'Instagram User';
 
+    const profileUsername = extractInstagramUsernameFromProfileUrl(targetUrl);
+    if (profileUsername) {
+      username = profileUsername;
+    }
+
     const handleMatch = title?.match(/@([a-zA-Z0-9._]+)/) || combinedText.match(/@([a-zA-Z0-9._]+)/);
     if (handleMatch && handleMatch[1]) {
       username = handleMatch[1].trim();
-    } else {
+    } else if (username === 'unknown') {
       const userMatch = combinedText.match(/(?:-\s*|^\s*)([a-zA-Z0-9._]+)\s+on\s+/i);
       if (userMatch && userMatch[1]) {
         username = userMatch[1].trim();
@@ -212,13 +334,14 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
     // Extract Reel/Post video & carousel image URLs via Instagram embed fast-path
     const shortcodeMatch = normalizedUrl.match(/\/(?:reel|reels|p|tv)\/([a-zA-Z0-9_-]+)/i);
     const shortcode = shortcodeMatch ? shortcodeMatch[1] : null;
+    const isProfile = !shortcode && isInstagramProfileUrl(targetUrl);
     const mediaList: MediaItem[] = [];
     let embedAvatar: string | null = null;
     let embedHtml = '';
     let crawlerHtml: string | null = cheerioData?.rawHtml || null;
 
     // Resilient fallback: If crawler HTML was not captured by scrapeWithCheerio, fetch directly
-    if (!crawlerHtml && shortcode) {
+    if (!crawlerHtml) {
       try {
         const crawlerRes = await axios.get(normalizedUrl, {
           headers: {
@@ -233,6 +356,155 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
         }
       } catch {
         // Continue with available data
+      }
+    }
+
+    // Profile Extraction: Scrape first 6 recent images on profile in exact visual grid order
+    if (isProfile) {
+      // 1. If client provided requestHtml, parse directly
+      if (requestHtml) {
+        const fromRequestHtml = extractInstagramProfileMediaFromHtml(requestHtml);
+        for (const m of fromRequestHtml) {
+          if (mediaList.length >= 6) break;
+          if (!mediaList.some((existing) => existing.url === m.url)) {
+            mediaList.push(m);
+          }
+        }
+      }
+
+      // 2. Headless browser extraction (Playwright) to capture desktop ordered timeline (polaris_ordered_timeline_connection)
+      if (mediaList.length < 6) {
+        try {
+          const pwData = await playwrightEngine.scrape<string[]>(normalizedUrl, {
+            waitSelector: 'a[href*="/p/"], a[href*="/reel/"], div._aagu, div._aagv, main',
+            waitTimeout: 2000,
+            timeout: 8000,
+            includeHtml: true,
+            customEvaluator: async (page) => {
+              return await page.evaluate(() => {
+                // 1. Script tag check for polaris_ordered_timeline_connection
+                const scripts = Array.from(document.querySelectorAll('script[type="application/json"]'));
+                for (const s of scripts) {
+                  if (s.textContent && s.textContent.includes('polaris_ordered_timeline_connection')) {
+                    try {
+                      const json = JSON.parse(s.textContent);
+                      const findConn = (obj: any): any => {
+                        if (!obj || typeof obj !== 'object') return null;
+                        if (obj.polaris_ordered_timeline_connection) return obj.polaris_ordered_timeline_connection;
+                        for (const k of Object.keys(obj)) {
+                          const res = findConn(obj[k]);
+                          if (res) return res;
+                        }
+                        return null;
+                      };
+                      const conn = findConn(json);
+                      if (conn && Array.isArray(conn.edges) && conn.edges.length > 0) {
+                        const list: string[] = [];
+                        for (const edge of conn.edges) {
+                          const uri = edge.node?.display_uri || edge.node?.image_versions2?.candidates?.[0]?.url;
+                          if (uri) {
+                            list.push(uri);
+                            if (list.length >= 6) return list;
+                          }
+                        }
+                        if (list.length > 0) return list;
+                      }
+                    } catch {}
+                  }
+                }
+
+                // 2. Post / reel link anchor images in visual grid order
+                const links = Array.from(document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]'));
+                const domImgs: string[] = [];
+                const seen = new Set<string>();
+                for (const a of links) {
+                  const img = a.querySelector('img');
+                  const src = img ? img.getAttribute('src') : null;
+                  if (src && !seen.has(src)) {
+                    seen.add(src);
+                    domImgs.push(src);
+                    if (domImgs.length >= 6) return domImgs;
+                  }
+                }
+
+                // 3. Grid container image wrappers
+                const selectors = 'div._aagu img, div._aagv img, div._ac7v img, div.xg7h5cd img, div.x1i5p2am img, div._a6hd img';
+                const imgs = Array.from(document.querySelectorAll(selectors));
+                for (const img of imgs) {
+                  const src = (img as HTMLImageElement).src || img.getAttribute('src');
+                  if (src && !seen.has(src)) {
+                    const l = src.toLowerCase();
+                    if (
+                      l.includes('150x150') ||
+                      l.includes('s150x150') ||
+                      l.includes('profile_pic') ||
+                      l.includes('avatar') ||
+                      l.includes('rsrc.php')
+                    ) {
+                      continue;
+                    }
+                    seen.add(src);
+                    domImgs.push(src);
+                    if (domImgs.length >= 6) return domImgs;
+                  }
+                }
+                return domImgs;
+              });
+            },
+          });
+
+          if (pwData.customData && pwData.customData.length > 0) {
+            mediaList.length = 0; // Canonical ordered list from real browser
+            for (const u of pwData.customData) {
+              if (mediaList.length >= 6) break;
+              const cleaned = cleanMediaUrl(u);
+              if (cleaned && !mediaList.some((m) => m.url === cleaned) && !isAvatarUrl(cleaned)) {
+                mediaList.push({ type: 'image', url: cleaned });
+              }
+            }
+          } else if (pwData.html) {
+            const fromPwHtml = extractInstagramProfileMediaFromHtml(pwData.html);
+            if (fromPwHtml.length > 0) {
+              mediaList.length = 0;
+              for (const m of fromPwHtml) {
+                if (mediaList.length >= 6) break;
+                if (!mediaList.some((existing) => existing.url === m.url)) {
+                  mediaList.push(m);
+                }
+              }
+            }
+          }
+
+          if (pwData.title && (!title || title === 'Instagram Post')) {
+            title = pwData.title;
+          }
+          if (pwData.description && !description) {
+            description = pwData.description;
+          }
+        } catch (pwErr) {
+          logger.warn('InstagramExtractor', `Playwright profile extraction failed, falling back to crawler: ${(pwErr as Error).message}`);
+        }
+      }
+
+      // 3. Crawler HTML fallback if still incomplete
+      if (mediaList.length < 6 && crawlerHtml) {
+        const fromCrawler = extractInstagramProfileMediaFromHtml(crawlerHtml);
+        for (const m of fromCrawler) {
+          if (mediaList.length >= 6) break;
+          if (!mediaList.some((existing) => existing.url === m.url)) {
+            mediaList.push(m);
+          }
+        }
+
+        if (mediaList.length < 6) {
+          const cdnMatches = [...crawlerHtml.matchAll(/https?:\/\/[^"'\s<>\\]+?(?:fbcdn\.net|cdninstagram\.com)[^"'\s<>\\]+?\.jpg[^"'\s<>\\]*/gi)];
+          for (const match of cdnMatches) {
+            if (mediaList.length >= 6) break;
+            const cleaned = cleanMediaUrl(match[0]);
+            if (!cleaned || mediaList.some((m) => m.url === cleaned) || isAvatarUrl(cleaned)) continue;
+            mediaList.push({ type: 'image', url: cleaned });
+          }
+        }
       }
     }
 
@@ -379,13 +651,42 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
             embedAvatar = cleanMediaUrl(headerAvatar);
           }
         }
+
+        // 7. Verified Status Extraction from Embed Header DOM & JSON
+        const headerVerifiedBadge =
+          $embed('.Header .VerifiedSprite, .Header [class*="VerifiedSprite"], .HoverCard .VerifiedSprite').length > 0;
+        const embedVerifiedJson =
+          /\\?"is_verified\\?"\s*:\s*true/i.test(embedHtml) &&
+          (embedHtml.includes('VerifiedSprite') ||
+            (username !== 'unknown' &&
+              (new RegExp(`"username"\\s*:\\s*"${username}"[\\s\\S]{0,300}?"is_verified"\\s*:\\s*true`, 'i').test(embedHtml) ||
+               new RegExp(`"is_verified"\\s*:\\s*true[\\s\\S]{0,300}?"username"\\s*:\\s*"${username}"`, 'i').test(embedHtml))));
+
+        if (headerVerifiedBadge || embedVerifiedJson) {
+          isVerified = true;
+        }
       } catch {
         // Fallback if embed fetch times out
       }
     }
 
-    // Fallback for Avatar: Fast Profile Fetch using crawler headers
-    if (!embedAvatar && username && username !== 'unknown') {
+    // 8. Resilient Fallback for Verified Status from Crawler HTML
+    if (!isVerified && crawlerHtml) {
+      const crawlerAuthorVerified =
+        (username !== 'unknown' &&
+          (new RegExp(`"username"\\s*:\\s*"${username}"[\\s\\S]{0,300}?"is_verified"\\s*:\\s*true`, 'i').test(crawlerHtml) ||
+           new RegExp(`"is_verified"\\s*:\\s*true[\\s\\S]{0,300}?"username"\\s*:\\s*"${username}"`, 'i').test(crawlerHtml))) ||
+        (displayName && displayName !== 'Instagram User' &&
+          new RegExp(`"full_name"\\s*:\\s*"${displayName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"[\\s\\S]{0,150}?"is_verified"\\s*:\\s*true`, 'i').test(crawlerHtml)) ||
+        /"is_verified"\s*:\s*true[\s\S]{0,100}?"__typename"\s*:\s*"User"/i.test(crawlerHtml);
+
+      if (crawlerAuthorVerified) {
+        isVerified = true;
+      }
+    }
+
+    // Fallback for Avatar & Verified Status: Fast Profile Fetch using crawler headers
+    if ((!embedAvatar || !isVerified) && username && username !== 'unknown') {
       try {
         const uRes = await axios.get(`https://www.instagram.com/${username}/`, {
           headers: {
@@ -394,21 +695,33 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
           },
           timeout: 4000,
         });
-        const $u = cheerio.load(uRes.data);
+        const userHtml = typeof uRes.data === 'string' ? uRes.data : '';
+        const $u = cheerio.load(userHtml);
         const userOgImg = $u('meta[property="og:image"]').attr('content');
-        if (userOgImg) {
+        if (userOgImg && !embedAvatar) {
           embedAvatar = cleanMediaUrl(userOgImg);
+        }
+        if (!isVerified && /"is_verified"\s*:\s*true/i.test(userHtml)) {
+          isVerified = true;
         }
       } catch {
         // Ignore user page fetch error
       }
     }
 
+    if (isProfile && !embedAvatar && image) {
+      embedAvatar = cleanMediaUrl(image);
+    }
+
     // Final clean pass on description to remove any residual prefixes/suffixes
     description = sanitizeDescription(description, username);
 
     const finalSnapshot =
-      image || mediaList.find((m) => m.type === 'image')?.url || mediaList[0]?.url || null;
+      (isProfile && mediaList[0]?.url) ||
+      image ||
+      mediaList.find((m) => m.type === 'image')?.url ||
+      mediaList[0]?.url ||
+      null;
 
     const hasVideo = mediaList.some((m) => m.type === 'video');
     const videoThumbnail = hasVideo ? finalSnapshot : null;
@@ -418,9 +731,9 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
         username,
         name: displayName,
         avatar_url: embedAvatar || cheerioData?.authorAvatar || null,
-        verified: false,
+        verified: isVerified,
       },
-      metrics,
+      metrics: sanitizeMetrics(metrics),
       media: mediaList,
       posted_at: publishedAt || new Date().toISOString(),
       video_thumbnail: videoThumbnail,
@@ -429,27 +742,65 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
     // If Cheerio and embed returned nothing useful (e.g. login wall / blocked), fallback to optimized Playwright
     if (!finalSnapshot && (!description || description.trim() === '') && (title === 'Instagram Post' || !title)) {
       try {
-        const pwData = await playwrightEngine.scrape(targetUrl, {
-          waitSelector: 'article, main',
+        const pwData = await playwrightEngine.scrape<string[]>(targetUrl, {
+          waitSelector: isProfile ? 'div._aagu, div._aagv, div.xg7h5cd, main' : 'article, main',
           waitTimeout: 2500,
+          customEvaluator: isProfile
+            ? async (page) => {
+                return await page.evaluate(() => {
+                  const selector =
+                    'div._aagu img, div._aagv img, div._ac7v img, div.xg7h5cd img, div.x1i5p2am img, div._a6hd img, a[href*="/p/"] img, a[href*="/reel/"] img';
+                  const imgs = Array.from(document.querySelectorAll(selector));
+                  const results: string[] = [];
+                  const seen = new Set<string>();
+                  for (const img of imgs) {
+                    const src = (img as HTMLImageElement).src;
+                    if (!src || seen.has(src)) continue;
+                    const l = src.toLowerCase();
+                    if (
+                      l.includes('150x150') ||
+                      l.includes('s150x150') ||
+                      l.includes('profile_pic') ||
+                      l.includes('avatar') ||
+                      l.includes('rsrc.php')
+                    ) {
+                      continue;
+                    }
+                    seen.add(src);
+                    results.push(src);
+                    if (results.length >= 6) break;
+                  }
+                  return results;
+                });
+              }
+            : undefined,
         });
 
-        if (pwData.title || pwData.description || pwData.snapshot) {
-          const pwMedia: MediaItem[] = pwData.snapshot ? [{ type: 'image', url: pwData.snapshot }] : mediaList;
+        if (pwData.title || pwData.description || pwData.snapshot || (pwData.customData && pwData.customData.length > 0)) {
+          let pwMedia: MediaItem[] = mediaList;
+          if (pwData.customData && pwData.customData.length > 0) {
+            pwMedia = pwData.customData.map((u) => ({ type: 'image', url: cleanMediaUrl(u) }));
+          } else if (pwData.snapshot) {
+            pwMedia = [{ type: 'image', url: pwData.snapshot }];
+          }
           const pwHasVideo = pwMedia.some((m) => m.type === 'video');
           return {
-            title: pwData.title || 'Instagram Post',
+            title:
+              pwData.title ||
+              (isProfile && username !== 'unknown'
+                ? `${displayName} (@${username}) on Instagram`
+                : 'Instagram Post'),
             description: pwData.description || '',
-            logo: INSTAGRAM_LOGO_URL,
+            logo: pwData.logo || logo,
             ogSiteName,
             card_data: {
               author: {
                 username,
                 name: pwData.author || displayName,
                 avatar_url: cheerioData?.authorAvatar || embedAvatar || null,
-                verified: false,
+                verified: isVerified,
               },
-              metrics,
+              metrics: sanitizeMetrics(metrics),
               media: pwMedia,
               posted_at: pwData.publishedAt || publishedAt || new Date().toISOString(),
               video_thumbnail: pwHasVideo ? (pwData.snapshot || finalSnapshot) : null,
@@ -465,11 +816,13 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
       title:
         title && title !== 'Instagram Post'
           ? title
-          : username !== 'unknown'
-            ? `Post by @${username} on Instagram`
-            : 'Instagram Post',
+          : isProfile && username !== 'unknown'
+            ? `${displayName} (@${username}) on Instagram`
+            : username !== 'unknown'
+              ? `Post by @${username} on Instagram`
+              : 'Instagram Post',
       description: description || '',
-      logo: INSTAGRAM_LOGO_URL,
+      logo,
       ogSiteName,
       card_data,
     };

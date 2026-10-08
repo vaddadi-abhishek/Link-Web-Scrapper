@@ -1,10 +1,11 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
-import { PlatformExtractor, ExtractionResult, RedditCardData, MediaItem } from './types';
+import { PlatformExtractor, ExtractionResult, RedditCardData, MediaItem, sanitizeMetrics } from './types';
 import { resolveUrl } from '../../utils/urlFormatter';
-import { cleanTitle, cleanDescription } from '../../utils/textCleaner';
+import { cleanTitle, cleanDescription, unescapeHtml } from '../../utils/textCleaner';
 import { parseFormattedNumber } from '../../utils/numberParser';
 import { playwrightEngine } from '../playwrightEngine';
+import { avatarCache } from '../../utils/cache';
 
 const REDDIT_LOGO_URL = 'https://www.redditstatic.com/shreddit/assets/favicon/192x192.png';
 
@@ -38,12 +39,64 @@ function extractPostId(url: string): string | null {
   return match && match[1] ? match[1] : null;
 }
 
+export function extractRedditCommentId(url: string | null | undefined): string | null {
+  if (!url || typeof url !== 'string') return null;
+  const cleanUrl = url.split(/[?#]/)[0].replace(/\/+$/, '');
+
+  const explicitMatch = cleanUrl.match(/\/comments\/[a-zA-Z0-9_]+\/(?:comment|context|_)\/([a-zA-Z0-9]+)/i);
+  if (explicitMatch && explicitMatch[1]) {
+    return explicitMatch[1];
+  }
+
+  const threePartMatch = cleanUrl.match(/\/comments\/[a-zA-Z0-9_]+\/[^/]+\/([a-zA-Z0-9]+)$/i);
+  if (threePartMatch && threePartMatch[1]) {
+    return threePartMatch[1];
+  }
+
+  const qMatch = url.match(/[?&]comment=([a-zA-Z0-9]+)/i);
+  if (qMatch && qMatch[1]) {
+    return qMatch[1];
+  }
+
+  return null;
+}
+
 function getSubredditIcon(subredditName: string, customIcon?: string | null): string {
-  if (customIcon && customIcon.startsWith('http') && !customIcon.includes('default')) {
+  if (customIcon && customIcon.startsWith('http') && !customIcon.includes('default') && !customIcon.includes('ui-avatars')) {
     return customIcon;
   }
-  const clean = subredditName.replace(/^r\//i, '').trim();
-  return `https://ui-avatars.com/api/?name=${encodeURIComponent(clean || 'Reddit')}&background=ff4500&color=fff&size=128&bold=true`;
+  return REDDIT_LOGO_URL;
+}
+
+async function resolveSubredditIcon(subredditName: string): Promise<string | null> {
+  const cleanSub = subredditName.replace(/^r\//i, '').trim();
+  if (!cleanSub) return null;
+  const cacheKey = `reddit_icon:${cleanSub.toLowerCase()}`;
+  const cached = avatarCache.get(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const res = await axios.get(`https://www.reddit.com/r/${encodeURIComponent(cleanSub)}/`, {
+      headers: {
+        'User-Agent': 'Twitterbot/1.0',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+      timeout: 3000,
+      validateStatus: (status) => status === 200,
+    });
+    if (res && res.data) {
+      const matches = String(res.data).match(/https:\/\/styles\.redditmedia\.com\/[^\s"'\\]+/gi) || [];
+      const communityIconMatch = matches.find((m) => m.includes('communityIcon') || m.includes('community_icon') || m.includes('icon'));
+      if (communityIconMatch) {
+        const cleanIcon = unescapeHtml(communityIconMatch).replace(/&amp;/g, '&');
+        avatarCache.set(cacheKey, cleanIcon);
+        return cleanIcon;
+      }
+    }
+  } catch {
+    // Non-critical background resolution fallback
+  }
+  return null;
 }
 
 export function isValidRedditPostImage(url: string | null | undefined): boolean {
@@ -202,7 +255,7 @@ async function tryPullPushReddit(postId: string): Promise<ExtractionResult<Reddi
 
     return {
       title,
-      description,
+      description: description && description.trim() ? description.trim() : null,
       logo: REDDIT_LOGO_URL,
       ogSiteName: 'Reddit',
       card_data: {
@@ -211,12 +264,12 @@ async function tryPullPushReddit(postId: string): Promise<ExtractionResult<Reddi
           icon_url: iconUrl,
         },
         author,
-        metrics: {
+        metrics: sanitizeMetrics({
           upvotes,
           comments,
-        },
+        }),
         posted_at: post.created_utc ? new Date(post.created_utc * 1000).toISOString() : new Date().toISOString(),
-        media: mediaList,
+        media: mediaList.length > 0 ? mediaList : null,
         video_thumbnail: videoThumbnail,
       },
     };
@@ -252,7 +305,17 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
     let description: string | null = null;
     let subredditName = extractSubreddit(targetUrl);
     let subredditIcon: string | null = null;
+    const initialCleanSub = subredditName.replace(/^r\//i, '').trim();
+    if (initialCleanSub) {
+      const cachedIcon = avatarCache.get(`reddit_icon:${initialCleanSub.toLowerCase()}`);
+      if (cachedIcon) {
+        subredditIcon = cachedIcon;
+      }
+    }
     const mediaList: MediaItem[] = [];
+
+    const commentId = extractRedditCommentId(targetUrl) || extractRedditCommentId(canonicalUrl);
+    const isCommentUrl = Boolean(commentId);
 
     // -----------------------------------------------------------
     // Tier 1: Fast HTTP Shortlink Resolution & Metadata (Twitterbot UA)
@@ -279,44 +342,58 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
         }
 
         const h1Title = $('h1[slot="title"], h1[id^="post-title"]').first().text().trim();
-        if (h1Title) {
-          title = cleanTitle(cleanRedditTitle(h1Title));
-        } else {
-          const ogTitle = cleanRedditTitle($('meta[property="og:title"]').attr('content'));
-          const docTitle = cleanRedditTitle($('title').text());
-          const rawTitle = ogTitle || docTitle || '';
-          if (rawTitle && rawTitle !== 'Reddit' && rawTitle !== 'Reddit Post') {
-            title = cleanTitle(rawTitle);
+        const ogTitle = cleanRedditTitle($('meta[property="og:title"]').attr('content'));
+        const docTitle = cleanRedditTitle($('title').text());
+        const rawTitle = ogTitle || docTitle || h1Title || '';
+
+        if (isCommentUrl && ogTitle) {
+          title = cleanTitle(ogTitle);
+          const authorMatch = ogTitle.match(/^([a-zA-Z0-9_-]+)'s comment on/i);
+          if (authorMatch && authorMatch[1]) {
+            author = `u/${authorMatch[1]}`;
           }
+        } else if (h1Title) {
+          title = cleanTitle(cleanRedditTitle(h1Title));
+        } else if (rawTitle && rawTitle !== 'Reddit' && rawTitle !== 'Reddit Post') {
+          title = cleanTitle(rawTitle);
         }
 
-        const articleBodyEl = $('shreddit-post-text-body [property="schema:articleBody"]').first();
-        if (articleBodyEl.length > 0) {
-          const ps: string[] = [];
-          articleBodyEl.find('p').each((_, el) => {
-            const pText = $(el).text().trim();
-            if (pText) ps.push(pText);
-          });
-          description = ps.length > 0 ? ps.join('\n\n') : articleBodyEl.text().trim();
-        } else {
-          const fallbackBody = $('shreddit-post-text-body [data-post-click-location="text-body"]').first().text().trim() ||
-            $('shreddit-post-text-body').first().text().trim();
-          if (fallbackBody) description = fallbackBody;
-        }
-        if (description) {
-          description = cleanDescription(description);
+        if (!isCommentUrl) {
+          const articleBodyEl = $('shreddit-post-text-body [property="schema:articleBody"]').first();
+          if (articleBodyEl.length > 0) {
+            const ps: string[] = [];
+            articleBodyEl.find('p').each((_, el) => {
+              const pText = $(el).text().trim();
+              if (pText) ps.push(pText);
+            });
+            description = ps.length > 0 ? ps.join('\n\n') : articleBodyEl.text().trim();
+          } else {
+            const fallbackBody = $('shreddit-post-text-body [data-post-click-location="text-body"]').first().text().trim() ||
+              $('shreddit-post-text-body').first().text().trim();
+            if (fallbackBody) description = fallbackBody;
+          }
+          if (description) {
+            description = cleanDescription(description);
+          }
+
+          const metaDesc = $('meta[name="description"]').attr('content') || $('meta[property="og:description"]').attr('content') || '';
+          const votesMatch = metaDesc.match(/([\d,.]+[KMBkmb]?)\s*votes?/i);
+          if (votesMatch) upvotes = parseFormattedNumber(votesMatch[1]);
+          const commentsMatch = metaDesc.match(/([\d,.]+[KMBkmb]?)\s*comments?/i);
+          if (commentsMatch) comments = parseFormattedNumber(commentsMatch[1]);
+
+          if (!description && metaDesc) {
+            const isGeneric = GENERIC_REDDIT_DESC_PATTERNS.some((p) => metaDesc.toLowerCase().includes(p));
+            if (!isGeneric && !/^\s*[\d,.]+[KMBkmb]?\s*votes?,\s*[\d,.]+[KMBkmb]?\s*comments?\s*$/i.test(metaDesc)) {
+              description = cleanDescription(metaDesc);
+            }
+          }
         }
 
         const ogImage = $('meta[property="og:image"]').attr('content') || $('meta[name="twitter:image"]').attr('content');
         if (ogImage && isValidRedditPostImage(ogImage)) {
           snapshot = ogImage;
         }
-
-        const metaDesc = $('meta[name="description"]').attr('content') || $('meta[property="og:description"]').attr('content') || '';
-        const votesMatch = metaDesc.match(/([\d,.]+[KMBkmb]?)\s*votes?/i);
-        if (votesMatch) upvotes = parseFormattedNumber(votesMatch[1]);
-        const commentsMatch = metaDesc.match(/([\d,.]+[KMBkmb]?)\s*comments?/i);
-        if (commentsMatch) comments = parseFormattedNumber(commentsMatch[1]);
 
         subredditName = extractSubreddit(canonicalUrl, h1Title || $('title').text());
       }
@@ -335,7 +412,7 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
           timeout: 2500,
         });
         if (oembedRes.data) {
-          if (oembedRes.data.author_name) {
+          if (!isCommentUrl && oembedRes.data.author_name) {
             author = `u/${oembedRes.data.author_name}`;
           }
           if (!title && oembedRes.data.title) {
@@ -350,15 +427,15 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
     // -----------------------------------------------------------
     // Tier 3: PullPush Open API (if postId exists and data is missing)
     // -----------------------------------------------------------
-    if (postId && (!author || mediaList.length === 0)) {
+    if (!isCommentUrl && postId && (!author || mediaList.length === 0)) {
       const pullPushResult = await tryPullPushReddit(postId);
       if (pullPushResult) {
         if (!title) title = pullPushResult.title;
         if (!author || author.includes('_user')) author = pullPushResult.card_data.author;
         if (pullPushResult.description && !description) description = pullPushResult.description;
-        if (pullPushResult.card_data.metrics.upvotes && !upvotes) upvotes = pullPushResult.card_data.metrics.upvotes;
-        if (pullPushResult.card_data.metrics.comments && !comments) comments = pullPushResult.card_data.metrics.comments;
-        if (pullPushResult.card_data.media.length > 0) {
+        if (pullPushResult.card_data.metrics?.upvotes && !upvotes) upvotes = pullPushResult.card_data.metrics.upvotes;
+        if (pullPushResult.card_data.metrics?.comments && !comments) comments = pullPushResult.card_data.metrics.comments;
+        if (Array.isArray(pullPushResult.card_data.media) && pullPushResult.card_data.media.length > 0) {
           pullPushResult.card_data.media.forEach((m) => {
             if (m.type === 'image') {
               addOrUpgradeImage(mediaList, m.url);
@@ -379,26 +456,102 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
     let postedAt: string | null = null;
 
     // -----------------------------------------------------------
-    // Tier 4: Playwright Hydration (shreddit-post, shreddit-player, community icon)
+    // Tier 4: Playwright Hydration (shreddit-post, shreddit-comment, community icon)
     // -----------------------------------------------------------
-    if (!author || mediaList.length === 0 || !subredditIcon) {
+    const isMissingKeyData =
+      isCommentUrl ||
+      !author ||
+      author.includes('_user') ||
+      !description ||
+      (!upvotes && !comments) ||
+      !subredditIcon ||
+      subredditIcon.includes('ui-avatars') ||
+      mediaList.length === 0;
+
+    if (isMissingKeyData) {
       try {
         const pwResult = await playwrightEngine.scrape<any>(canonicalUrl, {
-          waitSelector: 'shreddit-post',
-          waitTimeout: 4000,
+          waitSelector: isCommentUrl ? 'shreddit-comment, shreddit-post' : 'shreddit-post',
+          waitTimeout: 5000,
           customEvaluator: async (page) => {
-            return await page.evaluate(() => {
+            return await page.evaluate((cId) => {
               const sp = document.querySelector('shreddit-post');
-              if (!sp) return null;
+              const subIconEl =
+                document.querySelector('img.shreddit-subreddit-icon__icon, faceplate-img.community-icon, img.community-icon') ||
+                document.querySelector('[data-testid="subreddit-icon"] img') ||
+                document.querySelector('a[href*="/r/"] img, a[href*="/r/"] faceplate-img') ||
+                document.querySelector('img[src*="communityIcon"], faceplate-img[src*="communityIcon"], img[src*="styles.redditmedia.com"], faceplate-img[src*="styles.redditmedia.com"]');
+              const subIcon = subIconEl?.getAttribute('src') || null;
 
-              // Title: Target specifically <h1 id="post-title-..." slot="title">
-              const titleEl = sp.querySelector('h1[slot="title"], h1[id^="post-title"]') || document.querySelector('h1[slot="title"], h1[id^="post-title"]');
-              const postTitle = titleEl ? (titleEl.textContent || '').trim() : (sp.getAttribute('post-title') || document.title);
+              const titleEl = sp?.querySelector('h1[slot="title"], h1[id^="post-title"]') || document.querySelector('h1[slot="title"], h1[id^="post-title"]');
+              const postTitle = titleEl ? (titleEl.textContent || '').trim() : (sp?.getAttribute('post-title') || document.title);
+              const postSubreddit = sp?.getAttribute('subreddit-prefixed-name') || null;
+
+              // If a comment ID is targeted, look for the target comment
+              let targetComment: HTMLElement | null = null;
+              if (cId) {
+                targetComment =
+                  document.querySelector(`shreddit-comment[thingid="t1_${cId}"]`) ||
+                  document.querySelector(`shreddit-comment[thingid*="${cId}"]`) ||
+                  document.querySelector('shreddit-comment[is-highlighted]') ||
+                  document.querySelector('shreddit-comment[is-current-permalink]') ||
+                  document.querySelector('shreddit-comment[depth="0"]') ||
+                  document.querySelector('shreddit-comment');
+              }
+
+              if (targetComment) {
+                const thingid = targetComment.getAttribute('thingid') || '';
+                const cAuthor = targetComment.getAttribute('author');
+                const cScore = targetComment.getAttribute('score');
+                const cCreated = targetComment.getAttribute('created') || targetComment.getAttribute('created-timestamp');
+                const cAvatar = targetComment.getAttribute('avatar');
+
+                const contentEl =
+                  targetComment.querySelector(`[id="${thingid}-comment-rtjson-content"]`) ||
+                  targetComment.querySelector('div[id*="-comment-rtjson-content"]') ||
+                  targetComment.querySelector('[slot="comment"]') ||
+                  targetComment.querySelector('div.md');
+
+                let cText = '';
+                if (contentEl) {
+                  const ps = Array.from(contentEl.querySelectorAll('p')).map((p) => ((p as HTMLElement).innerText || p.textContent || '').trim()).filter(Boolean);
+                  cText = ps.length > 0 ? ps.join('\n\n') : ((contentEl as HTMLElement).innerText || contentEl.textContent || '').trim();
+                } else {
+                  const directP = Array.from(targetComment.querySelectorAll('details > p, summary + p, p')).map((p) => ((p as HTMLElement).innerText || p.textContent || '').trim()).filter(Boolean);
+                  cText = directP.join('\n\n');
+                }
+
+                const childComments = targetComment.querySelectorAll('shreddit-comment');
+                const cReplies = childComments.length;
+
+                const commentImages: string[] = [];
+                const cImgs = Array.from(targetComment.querySelectorAll<HTMLImageElement>('img.media-lightbox-img, img[src*="preview.redd.it"], img[src*="i.redd.it"]'));
+                cImgs.forEach((img) => {
+                  if (img.src && !img.src.includes('avatar') && !img.src.includes('profileIcon') && !img.src.includes('snoo')) {
+                    commentImages.push(img.src);
+                  }
+                });
+
+                return {
+                  isComment: true,
+                  commentAuthor: cAuthor,
+                  commentScore: cScore,
+                  commentCreatedAt: cCreated,
+                  commentAvatar: cAvatar,
+                  commentText: cText,
+                  commentReplies: cReplies,
+                  commentImages,
+                  postTitle,
+                  postSubreddit,
+                  subIcon,
+                };
+              }
+
+              if (!sp) return null;
 
               const postAuthor = sp.getAttribute('author');
               const postScore = sp.getAttribute('score');
               const postCommentCount = sp.getAttribute('comment-count');
-              const postSubreddit = sp.getAttribute('subreddit-prefixed-name');
               const postType = sp.getAttribute('post-type');
               const createdAt = sp.getAttribute('created-timestamp');
 
@@ -420,13 +573,18 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
                 }
                 textBody = textBody.trim();
               }
+              if (!textBody) {
+                const textEl = document.querySelector('[data-testid="post-content"] p, [slot="text-body"] p, shreddit-post p');
+                if (textEl) {
+                  textBody = (textEl as HTMLElement).innerText || textEl.textContent || '';
+                }
+              }
 
               // Player / Video
               const player = sp.querySelector('shreddit-player');
               let videoUrl: string | null = null;
               let videoPoster: string | null = null;
               if (player) {
-                // Check packaged media JSON for direct high quality MP4
                 const packagedJsonStr = player.getAttribute('packaged-media-json');
                 if (packagedJsonStr) {
                   try {
@@ -512,13 +670,8 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
                 });
               }
 
-              // Subreddit Community Icon
-              const subIcon =
-                document.querySelector('img.shreddit-subreddit-icon__icon, faceplate-img.community-icon, img.community-icon')?.getAttribute('src') ||
-                document.querySelector('[data-testid="subreddit-icon"] img')?.getAttribute('src') ||
-                null;
-
               return {
+                isComment: false,
                 postTitle,
                 postAuthor,
                 postScore,
@@ -532,51 +685,92 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
                 images,
                 subIcon,
               };
-            });
+            }, commentId);
           },
         });
 
         const c = pwResult.customData;
         if (c) {
-          if (c.postTitle && (!title || title === 'Reddit Post' || title === 'Reddit' || title.includes('community on Reddit'))) {
-            title = cleanTitle(cleanRedditTitle(c.postTitle));
+          if (c.isComment) {
+            if (c.postTitle) {
+              const cleanPT = cleanTitle(cleanRedditTitle(c.postTitle));
+              if (!title || title === 'Reddit' || title === 'Reddit Post') {
+                title = c.commentAuthor ? `${c.commentAuthor}'s comment on "${cleanPT}"` : `Comment on "${cleanPT}"`;
+              }
+            }
+            if (c.commentAuthor) {
+              author = `u/${c.commentAuthor}`;
+            }
+            if (c.commentText) {
+              description = cleanDescription(c.commentText);
+            }
+            if (c.commentScore !== undefined && c.commentScore !== null && c.commentScore !== '') {
+              const parsedScore = parseInt(c.commentScore, 10);
+              if (!isNaN(parsedScore)) upvotes = parsedScore;
+            }
+            if (c.commentReplies !== undefined && c.commentReplies !== null) {
+              comments = c.commentReplies;
+            }
+            if (c.commentCreatedAt) {
+              postedAt = c.commentCreatedAt;
+            }
+            if (Array.isArray(c.commentImages) && c.commentImages.length > 0) {
+              c.commentImages.forEach((img: string) => addOrUpgradeImage(mediaList, img));
+              if (!snapshot && mediaList.length > 0) {
+                snapshot = mediaList[0].url;
+              }
+            }
+          } else {
+            if (c.postTitle && (!title || title === 'Reddit Post' || title === 'Reddit' || title.includes('community on Reddit'))) {
+              title = cleanTitle(cleanRedditTitle(c.postTitle));
+            }
+            if (c.postAuthor && (!author || author.includes('_user'))) {
+              author = `u/${c.postAuthor}`;
+            }
+            if (c.postScore !== undefined && c.postScore !== null && c.postScore !== '') {
+              const parsedScore = parseInt(c.postScore, 10);
+              if (!isNaN(parsedScore)) upvotes = parsedScore;
+            }
+            if (c.postCommentCount !== undefined && c.postCommentCount !== null && c.postCommentCount !== '') {
+              const parsedComments = parseInt(c.postCommentCount, 10);
+              if (!isNaN(parsedComments)) comments = parsedComments;
+            }
+            if (c.createdAt) postedAt = c.createdAt;
+
+            if (c.textBody) {
+              const cleanBody = cleanDescription(c.textBody);
+              if (
+                cleanBody &&
+                cleanBody.toLowerCase() !== subredditName.toLowerCase() &&
+                cleanBody.toLowerCase() !== (c.postAuthor || '').toLowerCase() &&
+                !cleanBody.startsWith('r/')
+              ) {
+                description = cleanBody;
+              }
+            }
+
+            if (c.videoUrl) {
+              if (!mediaList.some((m) => m.type === 'video')) {
+                mediaList.unshift({ type: 'video', url: c.videoUrl });
+              }
+              if (c.videoPoster) snapshot = c.videoPoster;
+            }
+
+            if (Array.isArray(c.images)) {
+              c.images.forEach((img: string) => {
+                addOrUpgradeImage(mediaList, img);
+              });
+              if (!snapshot && mediaList.length > 0) {
+                snapshot = mediaList[0].url;
+              }
+            }
           }
-          if (c.postAuthor && (!author || author.includes('_user'))) {
-            author = `u/${c.postAuthor}`;
-          }
-          if (c.postScore) upvotes = parseInt(c.postScore, 10) || upvotes;
-          if (c.postCommentCount) comments = parseInt(c.postCommentCount, 10) || comments;
+
           if (c.postSubreddit) subredditName = c.postSubreddit;
-          if (c.createdAt) postedAt = c.createdAt;
-
-          if (c.textBody) {
-            const cleanBody = cleanDescription(c.textBody);
-            if (
-              cleanBody &&
-              cleanBody.toLowerCase() !== subredditName.toLowerCase() &&
-              cleanBody.toLowerCase() !== (c.postAuthor || '').toLowerCase() &&
-              !cleanBody.startsWith('r/')
-            ) {
-              description = cleanBody;
-            }
-          }
-
-          if (c.subIcon) subredditIcon = c.subIcon;
-
-          if (c.videoUrl) {
-            if (!mediaList.some((m) => m.type === 'video')) {
-              mediaList.unshift({ type: 'video', url: c.videoUrl });
-            }
-            if (c.videoPoster) snapshot = c.videoPoster;
-          }
-
-          if (Array.isArray(c.images)) {
-            c.images.forEach((img: string) => {
-              addOrUpgradeImage(mediaList, img);
-            });
-            if (!snapshot && mediaList.length > 0) {
-              snapshot = mediaList[0].url;
-            }
+          if (c.subIcon) {
+            subredditIcon = unescapeHtml(c.subIcon).replace(/&amp;/g, '&');
+            const cleanSub = subredditName.replace(/^r\//i, '').trim();
+            if (cleanSub) avatarCache.set(`reddit_icon:${cleanSub.toLowerCase()}`, subredditIcon);
           }
         }
       } catch {
@@ -589,6 +783,12 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
     }
     if (!title) {
       title = 'Reddit Post';
+    }
+    if (!subredditIcon || subredditIcon.includes('ui-avatars')) {
+      const resolved = await resolveSubredditIcon(subredditName);
+      if (resolved) {
+        subredditIcon = resolved;
+      }
     }
     if (!subredditIcon) {
       subredditIcon = getSubredditIcon(subredditName);
@@ -604,21 +804,21 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
 
     return {
       title,
-      description: description || null,
+      description: description && description.trim() ? description.trim() : null,
       logo: REDDIT_LOGO_URL,
       ogSiteName: 'Reddit',
       card_data: {
         subreddit: {
           name: subredditName,
-          icon_url: subredditIcon,
+          icon_url: subredditIcon || REDDIT_LOGO_URL,
         },
         author,
-        metrics: {
+        metrics: sanitizeMetrics({
           upvotes,
           comments,
-        },
+        }),
         posted_at: postedAt || new Date().toISOString(),
-        media: mediaList,
+        media: mediaList.length > 0 ? mediaList : null,
         video_thumbnail: videoThumbnail,
       },
     };

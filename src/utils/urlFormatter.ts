@@ -178,11 +178,28 @@ export function canonicalizeUrl(rawUrl: string): string {
   // 2. Instagram Canonicalization
   // Matches: instagram.com/p/ID, instagram.com/reel/ID, instagram.com/reels/ID, instagram.com/tv/ID
   const igMatch = preCleaned.match(
-    /(?:https?:\/\/)?(?:www\.)?instagram\.com\/(?:reel|reels|p|tv)\/([a-zA-Z0-9_-]+)/i
+    /(?:https?:\/\/)?(?:www\.)?instagram\.com\/(reel|reels|p|tv)\/([a-zA-Z0-9_-]+)/i
   );
   if (igMatch) {
-    const shortcode = igMatch[1];
-    return `https://www.instagram.com/reel/${shortcode}/`;
+    const rawType = igMatch[1].toLowerCase();
+    const shortcode = igMatch[2];
+    const type = rawType === 'reels' ? 'reel' : rawType;
+    return `https://www.instagram.com/${type}/${shortcode}/`;
+  }
+
+  // 2b. Instagram Profile Canonicalization
+  // Matches: instagram.com/username, instagram.com/username/
+  const igProfileMatch = preCleaned.match(
+    /(?:https?:\/\/)?(?:www\.)?instagram\.com\/([a-zA-Z0-9._]+)\/?(?:\?.*)?$/i
+  );
+  if (
+    igProfileMatch &&
+    !['reel', 'reels', 'p', 'tv', 'stories', 'explore', 'direct', 'accounts', 'developer', 'about', 'legal', 'help', 'privacy'].includes(
+      igProfileMatch[1].toLowerCase()
+    )
+  ) {
+    const profileUser = igProfileMatch[1];
+    return `https://www.instagram.com/${profileUser}/`;
   }
 
   // 3. YouTube Canonicalization

@@ -165,6 +165,7 @@ export const pinterestExtractor: PlatformExtractor<PinterestCardData> = {
             media: parsed.media,
             posted_at: parsed.publishedAt || cheerioData.publishedAt || null,
             video_thumbnail: parsed.videoThumbnail,
+            metrics: null,
           },
         };
       }
@@ -193,6 +194,7 @@ export const pinterestExtractor: PlatformExtractor<PinterestCardData> = {
             media: parsed.media.length > 0 ? parsed.media : (pwData.snapshot ? [{ type: 'image', url: pwData.snapshot }] : []),
             posted_at: parsed.publishedAt || pwData.publishedAt || null,
             video_thumbnail: parsed.videoThumbnail,
+            metrics: null,
           },
         };
       }
@@ -211,6 +213,7 @@ export const pinterestExtractor: PlatformExtractor<PinterestCardData> = {
           media: pwData.snapshot ? [{ type: 'image', url: pwData.snapshot }] : [],
           posted_at: pwData.publishedAt || null,
           video_thumbnail: null,
+          metrics: null,
         },
       };
     } catch {
@@ -227,6 +230,7 @@ export const pinterestExtractor: PlatformExtractor<PinterestCardData> = {
           media: [],
           posted_at: null,
           video_thumbnail: null,
+          metrics: null,
         },
       };
     }

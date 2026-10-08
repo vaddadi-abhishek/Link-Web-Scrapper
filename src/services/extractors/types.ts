@@ -16,10 +16,16 @@ export interface XCardData {
     likes?: number;
     views?: number;
     bookmarks?: number;
-  };
+  } | null;
   media: MediaItem[] | null;
   posted_at: string;
   video_thumbnail?: string | null;
+  type?: string | null;
+  page_intent?: string | null;
+  article_content?: string | null;
+  word_count?: number | null;
+  reading_time_minutes?: number | null;
+  snapshot?: string | null;
 }
 
 export interface InstagramCardData {
@@ -32,7 +38,8 @@ export interface InstagramCardData {
   metrics: {
     likes?: number;
     comments?: number;
-  };
+    reposts?: number;
+  } | null;
   media: MediaItem[];
   posted_at: string;
   video_thumbnail?: string | null;
@@ -47,7 +54,7 @@ export interface FacebookCardData {
     likes?: number;
     comments?: number;
     shares?: number;
-  };
+  } | null;
   media: MediaItem[];
   posted_at: string | null;
   video_thumbnail?: string | null;
@@ -62,7 +69,7 @@ export interface LinkedInCardData {
     reactions?: number;
     comments?: number;
     reposts?: number;
-  };
+  } | null;
   media: MediaItem[];
   posted_at: string | null;
   type?: string | null;
@@ -87,9 +94,9 @@ export interface RedditCardData {
   metrics: {
     upvotes?: number;
     comments?: number;
-  };
+  } | null;
   posted_at: string | null;
-  media: MediaItem[];
+  media: MediaItem[] | null;
   video_thumbnail?: string | null;
 }
 
@@ -101,7 +108,7 @@ export interface YouTubeCardData {
   metrics: {
     views?: number;
     likes?: number;
-  };
+  } | null;
   video_id: string | null;
   posted_at: string | null;
   video_thumbnail?: string | null;
@@ -117,7 +124,7 @@ export interface PinterestCardData {
     saves?: number;
     comments?: number;
     repins?: number;
-  };
+  } | null;
   media?: MediaItem[];
   posted_at?: string | null;
   video_thumbnail?: string | null;
@@ -133,6 +140,23 @@ export interface GlobalWebCardData {
   article_content?: string | null;
   word_count?: number | null;
   reading_time_minutes?: number | null;
+  metrics?: Record<string, unknown> | null;
+}
+
+/**
+ * Normalizes metrics object: returns null if metrics is empty or contains no non-zero values.
+ */
+export function sanitizeMetrics<T extends Record<string, unknown>>(metrics: T | null | undefined): T | null {
+  if (!metrics || typeof metrics !== 'object') return null;
+  const entries = Object.entries(metrics).filter(([_, v]) => v !== undefined && v !== null);
+  if (entries.length === 0) return null;
+  const hasMeaningfulValue = entries.some(([_, v]) => {
+    if (typeof v === 'number') return v !== 0 && !isNaN(v);
+    if (typeof v === 'string') return v.trim() !== '' && v !== '0';
+    return Boolean(v);
+  });
+  if (!hasMeaningfulValue) return null;
+  return Object.fromEntries(entries) as T;
 }
 
 export interface ArticleData {

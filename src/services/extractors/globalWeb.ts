@@ -35,6 +35,7 @@ const buildGlobalCardData = (
     article_content: articleContent || null,
     word_count: wordCount !== undefined ? wordCount : null,
     reading_time_minutes: readingTimeMinutes !== undefined ? readingTimeMinutes : null,
+    metrics: null,
   };
 };
 
