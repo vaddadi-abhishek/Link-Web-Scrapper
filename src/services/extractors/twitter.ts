@@ -50,7 +50,7 @@ function upgradeAvatarUrl(url: string | null | undefined): string | null {
   const trimmed = url.trim();
   if (!trimmed) return null;
   if (trimmed.includes('pbs.twimg.com/profile_images/')) {
-    return trimmed.replace(/_(?:x96|normal)\.([a-zA-Z0-9]+)$/, '_200x200.$1');
+    return trimmed.replace(/_(?:x96|normal|200x200)\.([a-zA-Z0-9]+)$/, '_400x400.$1');
   }
   return trimmed;
 }
@@ -358,6 +358,336 @@ async function resolveAuthorProfile(handle: string): Promise<{ avatar_url: strin
 }
 
 /**
+ * Detects if a URL is an X / Twitter profile URL and extracts the clean username.
+ */
+export function extractTwitterProfileUsername(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.toLowerCase();
+    if (!/(?:^|\.)(?:twitter|x)\.com$/i.test(hostname)) {
+      return null;
+    }
+    const segments = parsed.pathname.split('/').filter(Boolean);
+    if (segments.length === 0) return null;
+
+    const first = segments[0].toLowerCase();
+    const systemRoutes = [
+      'home', 'explore', 'notifications', 'messages', 'search', 'settings',
+      'i', 'hashtag', 'login', 'signup', 'compose', 'tos', 'privacy',
+      'rules', 'help', 'intent', 'share', 'account'
+    ];
+    if (systemRoutes.includes(first)) return null;
+
+    if (segments.length === 1) {
+      if (/^[a-zA-Z0-9_]{1,30}$/.test(segments[0])) {
+        return segments[0];
+      }
+    } else if (segments.length === 2) {
+      const second = segments[1].toLowerCase();
+      if (['header_photo', 'photo', 'about', 'following', 'followers', 'verified_followers'].includes(second)) {
+        if (/^[a-zA-Z0-9_]{1,30}$/.test(segments[0])) {
+          return segments[0];
+        }
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parses Twitter/X profile DOM HTML structure (from client inspector, Chrome extension, Cheerio, or Playwright).
+ */
+export function parseTwitterProfileHtml(
+  rawHtml: string,
+  targetUrl: string,
+  cleanUser?: string
+): ExtractionResult<XCardData> | null {
+  if (!rawHtml || typeof rawHtml !== 'string' || !rawHtml.trim()) {
+    return null;
+  }
+
+  try {
+    const $ = cheerio.load(rawHtml);
+
+    // 1. Author Name & Handle
+    let authorName = '';
+    let handle = '';
+
+    const userNameEl = $('[data-testid="UserName"]').first();
+    if (userNameEl.length > 0) {
+      const firstSpan = userNameEl.find('span').first();
+      authorName = firstSpan.text().trim();
+
+      const textAll = userNameEl.text();
+      const handleMatch = textAll.match(/@([a-zA-Z0-9_]+)/);
+      if (handleMatch) {
+        handle = `@${handleMatch[1]}`;
+      }
+    }
+
+    if (!authorName) {
+      const ogTitle = $('meta[property="og:title"]').attr('content') || '';
+      if (ogTitle) {
+        const handleM = ogTitle.match(/\((@[a-zA-Z0-9_]+)\)/);
+        if (handleM) {
+          handle = handleM[1];
+          authorName = ogTitle.split(' (')[0].trim();
+        } else {
+          authorName = ogTitle.split(' on X')[0].split(' on Twitter')[0].trim();
+        }
+      }
+    }
+
+    if (!handle && cleanUser) {
+      handle = `@${cleanUser}`;
+    }
+    if (!authorName) {
+      authorName = handle ? handle.replace(/^@/, '') : 'X User';
+    }
+    if (!handle) {
+      handle = '@user';
+    }
+
+    // 2. Avatar
+    let avatarUrl: string | null = null;
+    const avatarImg = $('[data-testid^="UserAvatar-Container"] img, [aria-label="Opens profile photo"] img, a[href$="/photo"] img').first();
+    if (avatarImg.length > 0) {
+      avatarUrl = avatarImg.attr('src') || null;
+    }
+    if (!avatarUrl) {
+      const bgDiv = $('[data-testid^="UserAvatar-Container"] [style*="background-image"]').first();
+      if (bgDiv.length > 0) {
+        const style = bgDiv.attr('style') || '';
+        const match = style.match(/url\(["']?(https?:\/\/[^"']+)["']?\)/i);
+        if (match) avatarUrl = match[1];
+      }
+    }
+    if (!avatarUrl) {
+      const ogImg = $('meta[property="og:image"]').attr('content') || null;
+      if (ogImg && ogImg.includes('profile_images')) {
+        avatarUrl = ogImg;
+      }
+    }
+    avatarUrl = upgradeAvatarUrl(avatarUrl);
+
+    // 3. Banner / Header Photo
+    let bannerUrl: string | null = null;
+    const bannerImg = $('a[href*="/header_photo"] img, img[src*="profile_banners"]').first();
+    if (bannerImg.length > 0) {
+      bannerUrl = bannerImg.attr('src') || null;
+    }
+    if (!bannerUrl) {
+      const bannerBg = $('div[style*="profile_banners"], a[href*="/header_photo"] [style*="background-image"]').first();
+      if (bannerBg.length > 0) {
+        const style = bannerBg.attr('style') || '';
+        const match = style.match(/url\(["']?(https?:\/\/[^"']+)["']?\)/i);
+        if (match) bannerUrl = match[1];
+      }
+    }
+    if (!bannerUrl) {
+      const bannerMatch = rawHtml.match(/https:\/\/pbs\.twimg\.com\/profile_banners\/[0-9]+\/[0-9]+(?:\/[0-9x]+)?/);
+      if (bannerMatch) {
+        bannerUrl = bannerMatch[0];
+      }
+    }
+    if (bannerUrl && !bannerUrl.includes('/1500x500') && !bannerUrl.includes('/600x200')) {
+      bannerUrl = `${bannerUrl.replace(/\/$/, '')}/1500x500`;
+    }
+
+    // 4. Verified Badge
+    const verified =
+      $('[data-testid="icon-verified"]').length > 0 ||
+      $('svg[aria-label*="Verified"], svg[aria-label*="verified"]').length > 0 ||
+      rawHtml.includes('legacy_verified":true') ||
+      rawHtml.includes('is_blue_verified":true') ||
+      rawHtml.includes('verified_organization') ||
+      rawHtml.includes('blue_business') ||
+      rawHtml.includes('"verification":');
+
+    // 5. Bio / Description (Returns null when empty/blank)
+    let bio: string | null = null;
+    const descEl = $('[data-testid="UserDescription"]').first();
+    if (descEl.length > 0) {
+      const text = descEl.text().trim();
+      if (text) bio = text;
+    }
+    if (!bio) {
+      const ogDesc = $('meta[property="og:description"]').attr('content')?.trim() || '';
+      if (ogDesc) bio = ogDesc;
+    }
+    if (bio && !bio.trim()) {
+      bio = null;
+    }
+
+    // 6. Joined Date
+    let joinedDate: string | null = null;
+    const joinEl = $('[data-testid="UserJoinDate"]').first();
+    if (joinEl.length > 0) {
+      const jText = joinEl.text().trim();
+      if (jText) joinedDate = jText;
+    }
+    if (!joinedDate) {
+      const joinMatch = rawHtml.match(/Joined\s+([A-Za-z]+\s+\d{4})/i);
+      if (joinMatch) joinedDate = `Joined ${joinMatch[1]}`;
+    }
+
+    // 7. Following & Followers Counters (Metrics only)
+    let followingNum: number | undefined;
+    let followersNum: number | undefined;
+
+    const followingLink = $('a[href*="/following"]').first();
+    if (followingLink.length > 0) {
+      const m = followingLink.text().match(/([\d,.]+[KMBkmb]?)/);
+      if (m) followingNum = parseMetricValue(m[1]);
+    }
+
+    const followersLink = $('a[href*="/followers"], a[href*="/verified_followers"]').first();
+    if (followersLink.length > 0) {
+      const m = followersLink.text().match(/([\d,.]+[KMBkmb]?)/);
+      if (m) followersNum = parseMetricValue(m[1]);
+    }
+
+    return {
+      title: `${authorName} (${handle}) on X`,
+      description: bio,
+      logo: X_LOGO_URL,
+      ogSiteName: 'X (formerly Twitter)',
+      card_data: {
+        is_profile: true,
+        author: {
+          name: authorName,
+          handle,
+          avatar_url: avatarUrl,
+          verified,
+        },
+        banner_url: bannerUrl,
+        bio,
+        joined_date: joinedDate,
+        metrics: sanitizeMetrics({
+          following: followingNum,
+          followers: followersNum,
+        }),
+        media: null,
+        posted_at: new Date().toISOString(),
+        video_thumbnail: null,
+      },
+    };
+  } catch (err) {
+    logger.debug('TwitterExtractor', 'parseTwitterProfileHtml failed:', err);
+    return null;
+  }
+}
+
+/**
+ * High-performance FxTwitter API extractor for X profiles.
+ */
+async function tryFxTwitterProfile(
+  username: string,
+  targetUrl: string
+): Promise<ExtractionResult<XCardData> | null> {
+  try {
+    const cleanUser = username.replace(/^@/, '').trim();
+    const res = await axios.get(`https://api.fxtwitter.com/${cleanUser}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Accept': 'application/json',
+      },
+      timeout: 5000,
+      validateStatus: (s) => s === 200,
+    });
+
+    const user = res.data?.user;
+    if (!user || (!user.name && !user.screen_name)) {
+      return null;
+    }
+
+    const authorName = user.name || cleanUser;
+    const handle = user.screen_name ? `@${user.screen_name}` : `@${cleanUser}`;
+    let bannerUrl: string | null = null;
+    if (user.banner_url) {
+      bannerUrl = user.banner_url.endsWith('/1500x500') ? user.banner_url : `${user.banner_url}/1500x500`;
+    }
+    let avatarUrl: string | null = user.avatar_url ? upgradeAvatarUrl(user.avatar_url) : null;
+    if (avatarUrl && avatarUrl.includes('_normal.')) {
+      avatarUrl = avatarUrl.replace('_normal.', '_400x400.');
+    }
+
+    let joinedDate: string | null = null;
+    if (user.joined) {
+      const d = new Date(user.joined);
+      if (!isNaN(d.getTime())) {
+        joinedDate = `Joined ${d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}`;
+      }
+    }
+
+    const rawBio = user.description || null;
+    const bio = rawBio && rawBio.trim() ? rawBio.trim() : null;
+
+    const following = typeof user.following === 'number' ? user.following : undefined;
+    const followers = typeof user.followers === 'number' ? user.followers : undefined;
+
+    return {
+      title: `${authorName} (${handle}) on X`,
+      description: bio,
+      logo: X_LOGO_URL,
+      ogSiteName: 'X (formerly Twitter)',
+      card_data: {
+        is_profile: true,
+        author: {
+          name: authorName,
+          handle,
+          avatar_url: avatarUrl,
+          verified: Boolean(user.verification?.verified || user.protected),
+        },
+        banner_url: bannerUrl,
+        bio,
+        joined_date: joinedDate,
+        metrics: sanitizeMetrics({
+          following,
+          followers,
+        }),
+        media: null,
+        posted_at: user.joined && !isNaN(new Date(user.joined).getTime()) ? new Date(user.joined).toISOString() : new Date().toISOString(),
+        video_thumbnail: null,
+      },
+    };
+  } catch (err) {
+    logger.debug('TwitterExtractor', `FxTwitter profile extraction failed for @${username}:`, err);
+    return null;
+  }
+}
+
+/**
+ * Direct scraper targeting x.com with Twitterbot headers for profile pages.
+ */
+async function tryDirectTwitterProfileScrape(
+  targetUrl: string,
+  username?: string
+): Promise<ExtractionResult<XCardData> | null> {
+  try {
+    const cleanUser = username ? username.replace(/^@/, '').trim() : '';
+    const fetchUrl = cleanUser ? `https://x.com/${cleanUser}` : targetUrl;
+    const res = await axios.get(fetchUrl, {
+      headers: {
+        'User-Agent': 'Twitterbot/1.0',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+      timeout: 5000,
+      validateStatus: (s) => s === 200,
+    });
+
+    if (res.data && typeof res.data === 'string') {
+      return parseTwitterProfileHtml(res.data, targetUrl, cleanUser);
+    }
+  } catch (err) {
+    logger.debug('TwitterExtractor', 'Direct Twitterbot profile scrape failed:', err);
+  }
+  return null;
+}
+
+/**
  * Direct scraper targeting x.com with Twitterbot headers.
  * Extracts rich metadata directly from X's SSR payload and OpenGraph tags without Cloudflare challenges.
  */
@@ -441,7 +771,7 @@ async function tryDirectTwitterScrape(targetUrl: string): Promise<ExtractionResu
 
     const cleanDesc = cleanTweetText(ogDesc);
     let title = `${authorName} (${handle}) on X`;
-    let description = cleanDesc;
+    let description: string | null = cleanDesc && cleanDesc.trim() ? cleanDesc.trim() : null;
 
     // Detect X Article in direct scrape HTML
     const isArticle = html.includes('ArticleEntity') || html.includes('/i/article/');
@@ -724,7 +1054,7 @@ export function parseTwitterHtml(rawHtml: string, targetUrl: string): Extraction
     const postedAt = timeEl.attr('datetime') || new Date().toISOString();
 
     let title = `${authorName} (${handle}) on X`;
-    let finalDescription = description;
+    let finalDescription = (description && description.trim()) ? description.trim() : null;
 
     // 8. Article detection in HTML DOM & SSR state
     let isArticle = false;
@@ -1317,7 +1647,7 @@ async function tryTwitterOEmbed(targetUrl: string): Promise<ExtractionResult<XCa
 
     return {
       title: `${data.author_name} (${handle}) on X`,
-      description: cleanedText,
+      description: (cleanedText && cleanedText.trim()) ? cleanedText.trim() : null,
       logo: X_LOGO_URL,
       ogSiteName: 'X (formerly Twitter)',
       card_data: {
@@ -1343,6 +1673,70 @@ async function tryTwitterOEmbed(targetUrl: string): Promise<ExtractionResult<XCa
 export const twitterExtractor: PlatformExtractor<XCardData> = {
   platformKey: 'x',
   async extract(targetUrl: string, html?: string): Promise<ExtractionResult<XCardData>> {
+    const profileUsername = extractTwitterProfileUsername(targetUrl);
+    const hasProfileMarkers = Boolean(
+      html && (
+        html.includes('data-testid="UserName"') ||
+        html.includes('data-testid="UserDescription"') ||
+        html.includes('data-testid="UserJoinDate"') ||
+        html.includes('profile_banners')
+      )
+    );
+
+    // -----------------------------------------------------------
+    // Profile Extraction Pipeline (X / Twitter User Profile)
+    // -----------------------------------------------------------
+    if (profileUsername || hasProfileMarkers) {
+      // Tier 0: Direct HTML DOM Extraction (from Client / Extension)
+      if (html && typeof html === 'string' && html.trim()) {
+        const clientProfile = parseTwitterProfileHtml(html, targetUrl, profileUsername || undefined);
+        if (clientProfile && (clientProfile.card_data.author.avatar_url || clientProfile.card_data.banner_url || clientProfile.card_data.author.name !== 'X User')) {
+          return clientProfile;
+        }
+      }
+
+      // Tier 1: High-Performance FxTwitter User API
+      if (profileUsername) {
+        const fxProfile = await tryFxTwitterProfile(profileUsername, targetUrl);
+        if (fxProfile) return fxProfile;
+      }
+
+      // Tier 2: Direct x.com Twitterbot Scrape
+      const directProfile = await tryDirectTwitterProfileScrape(targetUrl, profileUsername || undefined);
+      if (directProfile && (directProfile.card_data.author.avatar_url || directProfile.card_data.banner_url || directProfile.card_data.author.name !== 'X User')) {
+        return directProfile;
+      }
+
+      // Tier 3: Playwright Fallback
+      try {
+        const pwData = await playwrightEngine.scrape(targetUrl, {
+          waitSelector: '[data-testid="UserName"], [data-testid="UserAvatar-Container"]',
+          waitTimeout: 4000,
+          timeout: 8000,
+          includeHtml: true,
+        });
+        if (pwData.html) {
+          const domProfile = parseTwitterProfileHtml(pwData.html, targetUrl, profileUsername || undefined);
+          if (domProfile) return domProfile;
+        }
+      } catch (err) {
+        logger.debug('TwitterExtractor', 'Playwright profile scrape failed:', err);
+      }
+
+      // Tier 4: Cheerio Crawler Fallback
+      try {
+        const cheerioData = await scrapeWithCheerio(targetUrl);
+        if (cheerioData?.rawHtml) {
+          const domProfile = parseTwitterProfileHtml(cheerioData.rawHtml, targetUrl, profileUsername || undefined);
+          if (domProfile) return domProfile;
+        }
+      } catch (err) {
+        logger.debug('TwitterExtractor', 'Cheerio profile scrape failed:', err);
+      }
+
+      if (directProfile) return directProfile;
+    }
+
     // -----------------------------------------------------------
     // Tier 0: Direct HTML DOM Extraction (from Client / Extension)
     // -----------------------------------------------------------
@@ -1433,7 +1827,7 @@ export const twitterExtractor: PlatformExtractor<XCardData> = {
     // Default graceful baseline
     return {
       title: 'Post on X',
-      description: '',
+      description: null,
       logo: X_LOGO_URL,
       ogSiteName: 'X (formerly Twitter)',
       card_data: {

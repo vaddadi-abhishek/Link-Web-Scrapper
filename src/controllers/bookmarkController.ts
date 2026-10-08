@@ -6,6 +6,7 @@ import { deriveSiteName } from '../utils/siteName';
 import { validateUrlAgainstSSRF } from '../utils/ssrfValidator';
 import { analyzeVisualContext, AIVisualAnalysisResult } from '../services/aiVisualService';
 import { canonicalizeUrl, isResolvableShortlink, resolveShortlink, extractLinkedInPostId } from '../utils/urlFormatter';
+import { extractTwitterProfileUsername } from '../services/extractors/twitter';
 import { logger } from '../utils/logger';
 import { supabaseAdmin } from '../utils/supabaseClient';
 import {
@@ -45,7 +46,7 @@ export interface BookmarkResponse {
   user_id: string;
   url: string;
   title: string;
-  description: string;
+  description: string | null;
   logo: string | null;
   snapshot_url?: string | null;
   snapshot?: string | null;
@@ -109,7 +110,7 @@ function mapBookmarkRow(row: BookmarkDbRow): BookmarkResponse {
     user_id: row.user_id,
     url: row.url,
     title: row.title || row.url,
-    description: row.description || '',
+    description: row.description && row.description.trim() ? row.description.trim() : null,
     logo: row.logo_url || null,
     snapshot_url: resolvedSnapshotUrl,
     snapshot: resolvedSnapshotUrl,
@@ -187,7 +188,30 @@ export async function getBookmarksController(req: AuthenticatedRequest, res: Res
       return;
     }
 
-    const formatted = ((data || []) as BookmarkDbRow[]).map(mapBookmarkRow);
+    const rows = (data || []) as BookmarkDbRow[];
+    for (const row of rows) {
+      const isXProfile = extractTwitterProfileUsername(row.url);
+      if (isXProfile) {
+        const cd = (row.card_data as Record<string, unknown>) || {};
+        const metrics = (cd.metrics as Record<string, unknown>) || {};
+        if (!cd.banner_url || !metrics.followers) {
+          // Trigger background enrichment for any profile missing complete metadata
+          dispatchExtraction(row.url, undefined, { forceRefresh: true }).then(async ({ result }) => {
+            if (result.card_data) {
+              Promise.resolve(
+                supabaseAdmin.from('bookmarks').update({
+                  card_data: result.card_data,
+                  description: (result.description && result.description.trim()) ? result.description.trim() : null,
+                  title: result.title || row.title,
+                }).eq('id', row.id)
+              ).catch(() => {});
+            }
+          }).catch(() => {});
+        }
+      }
+    }
+
+    const formatted = rows.map(mapBookmarkRow);
     res.status(200).json(formatted);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
@@ -314,6 +338,37 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
     }
 
     if (existingUserBm) {
+      const isXProfile = extractTwitterProfileUsername(canonicalUrl);
+      const existingCardData = existingUserBm.card_data as Record<string, unknown> | null;
+      const existingMetrics = (existingCardData?.metrics as Record<string, unknown>) || {};
+      const isMissingXProfileData = isXProfile && (!existingCardData?.is_profile || (!existingCardData?.banner_url && !existingMetrics.followers));
+
+      if (isMissingXProfileData) {
+        logger.info('BookmarkController', `Existing X profile bookmark ${canonicalUrl} has stale card_data. Upgrading to full profile metadata...`);
+        try {
+          const { result: freshResult } = await dispatchExtraction(canonicalUrl, undefined, { forceRefresh: true });
+          const freshCardData = freshResult.card_data ? { ...(freshResult.card_data as Record<string, unknown>) } : null;
+          const freshDesc = (freshResult.description && freshResult.description.trim()) ? freshResult.description.trim() : null;
+
+          if (freshCardData) {
+            await supabase
+              .from('bookmarks')
+              .update({
+                card_data: freshCardData,
+                description: freshDesc,
+                title: freshResult.title || existingUserBm.title,
+              })
+              .eq('id', existingUserBm.id);
+
+            existingUserBm.card_data = freshCardData;
+            existingUserBm.description = freshDesc;
+            if (freshResult.title) existingUserBm.title = freshResult.title;
+          }
+        } catch (enrichErr) {
+          logger.warn('BookmarkController', 'Failed to enrich stale X profile bookmark:', enrichErr);
+        }
+      }
+
       logger.info('BookmarkController', `Duplicate URL posted by user ${userId}: ${canonicalUrl}. Returning existing bookmark (0 credits used).`);
       const finalBm = mapBookmarkRow(existingUserBm as BookmarkDbRow);
       res.status(200).json({
@@ -384,7 +439,7 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
       (effectiveMediaList[0]?.url || null);
 
     const effectiveTitle = clientTitle || metadataResult.title || trimmedUrl;
-    const effectiveDescription = clientDescription || metadataResult.description || '';
+    const effectiveDescription = clientDescription || (metadataResult.description && metadataResult.description.trim() ? metadataResult.description.trim() : null);
 
     // Initial ai_status is pending_manual; AI context is decoupled and triggered via /bookmarks/:id/ai-context
     const aiStatus = 'pending_manual';

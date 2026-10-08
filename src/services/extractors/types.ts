@@ -16,6 +16,8 @@ export interface XCardData {
     likes?: number;
     views?: number;
     bookmarks?: number;
+    following?: number;
+    followers?: number;
   } | null;
   media: MediaItem[] | null;
   posted_at: string;
@@ -26,6 +28,11 @@ export interface XCardData {
   word_count?: number | null;
   reading_time_minutes?: number | null;
   snapshot?: string | null;
+  is_profile?: boolean;
+  banner_url?: string | null;
+  joined_date?: string | null;
+  bio?: string | null;
+  website?: string | null;
 }
 
 export interface InstagramCardData {
