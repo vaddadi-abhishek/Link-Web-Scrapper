@@ -4,7 +4,13 @@ import { PlatformExtractor, ExtractionResult, InstagramCardData, MediaItem, sani
 import { scrapeWithCheerio } from '../cheerioScraper';
 import { playwrightEngine } from '../playwrightEngine';
 import { resolveUrl } from '../../utils/urlFormatter';
-import { cleanTitle } from '../../utils/textCleaner';
+import {
+  cleanTitle,
+  normalizeParagraphs,
+  unescapeHtml,
+  stripEngagementHeader,
+  stripOuterQuotes,
+} from '../../utils/textCleaner';
 import { parseFormattedNumber } from '../../utils/numberParser';
 import { logger } from '../../utils/logger';
 
@@ -12,15 +18,40 @@ const INSTAGRAM_LOGO_URL = 'https://www.instagram.com/favicon.ico';
 
 function cleanInstagramText(raw: string | null): string {
   if (!raw) return '';
-  return raw
+  let text = String(raw);
+
+  // Convert HTML break and paragraph/block closing tags to newlines before stripping tags
+  text = text
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(?:p|div|li)>/gi, '\n');
+
+  // Unescape standard escaped unicode characters from JSON or scripts
+  text = text
     .replace(/\\u0026/g, '&')
     .replace(/\\u0027/g, "'")
     .replace(/\\u0022/g, '"')
+    .replace(/\\u003[cC]/g, '<')
+    .replace(/\\u003[eE]/g, '>')
+    .replace(/\\u000[aA]/g, '\n');
+
+  // Convert literal escaped newlines and carriage returns to actual newlines
+  text = text
+    .replace(/\\r\\n/g, '\n')
+    .replace(/\\r/g, '\n')
     .replace(/\\n/g, '\n')
-    .replace(/\\/g, '')
-    .replace(/&#064;/g, '@')
-    .replace(/<[^>]+>/g, '')
-    .trim();
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n');
+
+  // Remove remaining backslashes
+  text = text.replace(/\\/g, '');
+
+  // Strip remaining HTML tags
+  text = text.replace(/<[^>]+>/g, '');
+
+  // Unescape HTML entities (&quot;, &#064;, &amp;, etc.)
+  text = unescapeHtml(text);
+
+  return text.trim();
 }
 
 function cleanMediaUrl(raw: string | null): string {
@@ -40,7 +71,11 @@ function sanitizeDescription(raw: string | null, username?: string): string {
   if (!raw) return '';
   let desc = String(raw).trim();
 
-  // 1. If crawler format: "... on [Date]: "caption text"" or "... on Instagram: "caption text""
+  // 1. Strip outer quotes and platform engagement headers if present
+  desc = stripOuterQuotes(desc);
+  desc = stripEngagementHeader(desc);
+
+  // 2. If crawler format: "... on [Date]: "caption text"" or "... on Instagram: "caption text""
   const crawlerQuoteMatch =
     desc.match(/(?:.*?)\s+on\s+[A-Za-z]+\s+\d{1,2},?\s*\d{4}:\s*["“]([\s\S]*?)["”][.\s]*$/i) ||
     desc.match(/on Instagram:\s*["“]([\s\S]*?)["”][.\s]*$/i) ||
@@ -49,17 +84,20 @@ function sanitizeDescription(raw: string | null, username?: string): string {
     desc = crawlerQuoteMatch[1].trim();
   }
 
-  // 2. Remove trailing "View all ... comments" or "View more on Instagram"
+  // 3. Remove trailing "View all ... comments" or "View more on Instagram"
   desc = desc.replace(/\s*View all [\d,.]+[KMBkmb]? comments.*$/is, '').trim();
   desc = desc.replace(/\s*View more on Instagram.*$/is, '').trim();
 
-  // 3. If it starts with username directly attached (e.g. "rajshamaniTomorrow 9:09 PM" or "rajshamani Tomorrow")
+  // 4. If it starts with username directly attached (e.g. "rajshamaniTomorrow 9:09 PM" or "rajshamani Tomorrow")
   if (username && username !== 'unknown') {
     const userRegex = new RegExp(`^@?${username}[:\\s-]*`, 'i');
     desc = desc.replace(userRegex, '').trim();
   }
 
-  return cleanInstagramText(desc);
+  desc = cleanInstagramText(desc);
+  desc = normalizeParagraphs(desc);
+
+  return desc;
 }
 
 function extractInstagramVideo(embedHtml: string, rawHtml?: string | null): string | null {
@@ -609,20 +647,33 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
         const $caption = $embed('.Caption').first().clone();
         if ($caption.length > 0) {
           $caption.find('.CaptionUsername, .CaptionComments, .HoverCard, [class*="Username"], [class*="Comment"], script, style').remove();
+          $caption.find('br').replaceWith('\n');
+          $caption.find('p, div').each((_, el) => {
+            $embed(el).append('\n');
+          });
           const cText = $caption.text().trim();
           if (cText) {
             embedCaption = cleanInstagramText(cText);
           }
         }
         if (!embedCaption) {
-          const cText = $embed('.CaptionText').text().trim();
-          if (cText) {
-            embedCaption = cleanInstagramText(cText);
+          const $captionText = $embed('.CaptionText').first().clone();
+          if ($captionText.length > 0) {
+            $captionText.find('br').replaceWith('\n');
+            $captionText.find('p, div').each((_, el) => {
+              $embed(el).append('\n');
+            });
+            const cText = $captionText.text().trim();
+            if (cText) {
+              embedCaption = cleanInstagramText(cText);
+            }
           }
         }
 
         if (embedCaption) {
-          description = embedCaption;
+          if (!description || embedCaption.includes('\n') || !description.includes('\n') || embedCaption.length > description.length) {
+            description = embedCaption;
+          }
         }
 
         // 5. Metrics Extraction from Embed JSON & DOM
