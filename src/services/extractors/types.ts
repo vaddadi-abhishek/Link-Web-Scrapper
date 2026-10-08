@@ -43,6 +43,7 @@ export interface InstagramCardData {
   media: MediaItem[];
   posted_at: string;
   video_thumbnail?: string | null;
+  is_profile?: boolean;
 }
 
 export interface FacebookCardData {

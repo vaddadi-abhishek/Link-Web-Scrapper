@@ -788,6 +788,7 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
       media: mediaList,
       posted_at: publishedAt || new Date().toISOString(),
       video_thumbnail: videoThumbnail,
+      is_profile: isProfile,
     };
 
     // If Cheerio and embed returned nothing useful (e.g. login wall / blocked), fallback to optimized Playwright
@@ -855,6 +856,7 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
               media: pwMedia,
               posted_at: pwData.publishedAt || publishedAt || new Date().toISOString(),
               video_thumbnail: pwHasVideo ? (pwData.snapshot || finalSnapshot) : null,
+              is_profile: isProfile,
             },
           };
         }
