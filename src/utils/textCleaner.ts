@@ -228,14 +228,32 @@ export function isInstagramBlockedOrAuthWall(html: string | null | undefined, re
   }
   if (!html) return true;
 
-  const sample = html.substring(0, 5000).toLowerCase();
+  // Real Instagram profiles and posts contain og:description (followers/posts/caption) or og:title
+  const hasOgDesc = html.includes('property="og:description"');
+  const hasOgTitle = html.includes('property="og:title"');
+  const hasOgImg = html.includes('property="og:image"');
+
+  if (hasOgDesc) {
+    return false; // Valid post or profile page with metadata
+  }
+
+  if (hasOgTitle) {
+    // If og:title is just "Instagram" with no og:description and static generic assets, it's the landing/login page
+    const isGenericLanding = html.includes('content="Instagram"') && (html.includes('static.cdninstagram.com/rsrc.php') || !html.includes('cdninstagram.com'));
+    if (isGenericLanding && !hasOgImg) {
+      return true;
+    }
+    return false;
+  }
+
+  // Fallback checks for explicit login page titles
+  const sample = html.substring(0, 30000).toLowerCase();
   if (sample.includes('<title>login • instagram</title>') || sample.includes('<title>log in • instagram</title>')) {
     return true;
   }
 
-  // Instagram client-side React shell without OpenGraph metadata
-  const hasOg = sample.includes('property="og:title"') || sample.includes('property="og:image"') || sample.includes('property="og:description"');
-  if (!hasOg && (sample.includes('<title>instagram</title>') || !sample.includes('<title>'))) {
+  // Instagram client-side empty shell without any OpenGraph metadata
+  if (!hasOgDesc && !hasOgTitle && !hasOgImg) {
     return true;
   }
 

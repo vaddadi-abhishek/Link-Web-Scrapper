@@ -409,8 +409,16 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
     if (crawlerHtml) {
       const $c = cheerio.load(crawlerHtml);
       const cOgTitle = $c('meta[property="og:title"]').attr('content') || $c('title').text();
-      if (cOgTitle && (!title || title === 'Instagram' || title === 'Instagram Post')) {
-        title = cleanTitle(cOgTitle);
+      if (cOgTitle) {
+        if (!title || title === 'Instagram' || title === 'Instagram Post' || (isProfile && (!displayName || displayName === 'Instagram User'))) {
+          title = cleanTitle(cOgTitle);
+        }
+        if (!displayName || displayName === 'Instagram User') {
+          const nameMatch = cOgTitle.match(/^(.*?)\s*\(@/);
+          if (nameMatch && nameMatch[1]) {
+            displayName = nameMatch[1].trim();
+          }
+        }
       }
       const cOgDesc = $c('meta[property="og:description"]').attr('content');
       if (cOgDesc && (!description || description.trim() === '')) {
@@ -430,8 +438,19 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
 
     // Profile Extraction: Scrape first 6 recent images on profile in exact visual grid order
     if (isProfile) {
-      // 1. If client provided requestHtml, parse directly
-      if (requestHtml) {
+      // 1. Crawler HTML: Parse visual grid media directly from SSR crawler HTML (<2ms, instantaneous)
+      if (crawlerHtml && mediaList.length < 6) {
+        const fromCrawler = extractInstagramProfileMediaFromHtml(crawlerHtml);
+        for (const m of fromCrawler) {
+          if (mediaList.length >= 6) break;
+          if (!mediaList.some((existing) => existing.url === m.url)) {
+            mediaList.push(m);
+          }
+        }
+      }
+
+      // 2. Client provided requestHtml
+      if (requestHtml && mediaList.length < 6) {
         const fromRequestHtml = extractInstagramProfileMediaFromHtml(requestHtml);
         for (const m of fromRequestHtml) {
           if (mediaList.length >= 6) break;
@@ -441,7 +460,7 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
         }
       }
 
-      // 2. Headless browser extraction (Playwright) to capture desktop ordered timeline (polaris_ordered_timeline_connection)
+      // 3. Headless browser extraction (Playwright) fallback only if mediaList is still < 6
       if (mediaList.length < 6) {
         try {
           const pwData = await playwrightEngine.scrape<string[]>(normalizedUrl, {
@@ -767,7 +786,34 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
       }
     }
 
-    // Fallback for Avatar & Verified Status: Fast Profile Fetch using Googlebot
+    // Resilient Resolution for Profiles from Crawler HTML
+    if (isProfile) {
+      if (!embedAvatar) {
+        if (image) {
+          embedAvatar = cleanMediaUrl(image);
+        } else if (crawlerHtml) {
+          const $c = cheerio.load(crawlerHtml);
+          const ogImg = $c('meta[property="og:image"]').attr('content');
+          const domImg = $c('img[alt*="profile picture"]').attr('src');
+          if (ogImg || domImg) {
+            embedAvatar = cleanMediaUrl(ogImg || domImg || null);
+          }
+        }
+      }
+      if (!isVerified && crawlerHtml) {
+        if (
+          /"is_verified"\s*:\s*true/i.test(crawlerHtml) ||
+          crawlerHtml.includes('InstagramVerified') ||
+          (username !== 'unknown' &&
+            (new RegExp(`"username"\\s*:\\s*"${username}"[\\s\\S]{0,300}?"is_verified"\\s*:\\s*true`, 'i').test(crawlerHtml) ||
+             new RegExp(`"is_verified"\\s*:\\s*true[\\s\\S]{0,300}?"username"\\s*:\\s*"${username}"`, 'i').test(crawlerHtml)))
+        ) {
+          isVerified = true;
+        }
+      }
+    }
+
+    // Fallback for Avatar & Verified Status: Fast Profile Fetch using Googlebot (only if still missing)
     if ((!embedAvatar || !isVerified) && username && username !== 'unknown') {
       try {
         const uRes = await axios.get(`https://www.instagram.com/${username}/`, {
@@ -789,31 +835,6 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
         }
       } catch {
         // Ignore user page fetch error
-      }
-    }
-
-    if (isProfile && !embedAvatar) {
-      if (image) {
-        embedAvatar = cleanMediaUrl(image);
-      } else if (crawlerHtml) {
-        const $c = cheerio.load(crawlerHtml);
-        const ogImg = $c('meta[property="og:image"]').attr('content');
-        const domImg = $c('img[alt*="profile picture"]').attr('src');
-        if (ogImg || domImg) {
-          embedAvatar = cleanMediaUrl(ogImg || domImg || null);
-        }
-      }
-    }
-
-    if (!isVerified && crawlerHtml) {
-      if (
-        /"is_verified"\s*:\s*true/i.test(crawlerHtml) ||
-        crawlerHtml.includes('InstagramVerified') ||
-        (username !== 'unknown' &&
-          (new RegExp(`"username"\\s*:\\s*"${username}"[\\s\\S]{0,300}?"is_verified"\\s*:\\s*true`, 'i').test(crawlerHtml) ||
-           new RegExp(`"is_verified"\\s*:\\s*true[\\s\\S]{0,300}?"username"\\s*:\\s*"${username}"`, 'i').test(crawlerHtml)))
-      ) {
-        isVerified = true;
       }
     }
 
