@@ -15,15 +15,16 @@ export async function authMiddleware(
   next: NextFunction
 ): Promise<void> {
   try {
+    let token = '';
     const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      res.status(401).json({ error: 'Unauthorized: Missing or invalid Authorization header.' });
-      return;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.split(' ')[1]?.trim() || '';
+    } else if (typeof req.query.token === 'string' && req.query.token.trim()) {
+      token = req.query.token.trim();
     }
 
-    const token = authHeader.split(' ')[1]?.trim();
     if (!token) {
-      res.status(401).json({ error: 'Unauthorized: Bearer token is empty.' });
+      res.status(401).json({ error: 'Unauthorized: Missing or invalid authentication token.' });
       return;
     }
 
