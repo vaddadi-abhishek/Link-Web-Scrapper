@@ -214,4 +214,72 @@ export function isAccessDeniedOrChallenge(
   return false;
 }
 
+/**
+ * Detects whether an Instagram HTML response or redirection target is a login wall,
+ * auth challenge, or empty JavaScript shell without OpenGraph metadata.
+ */
+export function isInstagramBlockedOrAuthWall(html: string | null | undefined, responseUrl?: string | null): boolean {
+  if (!html && !responseUrl) return true;
+  if (responseUrl) {
+    const cleanUrl = responseUrl.toLowerCase();
+    if (cleanUrl.includes('/accounts/login') || cleanUrl.includes('/accounts/onetap') || cleanUrl.includes('/challenge/')) {
+      return true;
+    }
+  }
+  if (!html) return true;
+
+  const sample = html.substring(0, 5000).toLowerCase();
+  if (sample.includes('<title>login • instagram</title>') || sample.includes('<title>log in • instagram</title>')) {
+    return true;
+  }
+
+  // Instagram client-side React shell without OpenGraph metadata
+  const hasOg = sample.includes('property="og:title"') || sample.includes('property="og:image"') || sample.includes('property="og:description"');
+  if (!hasOg && (sample.includes('<title>instagram</title>') || !sample.includes('<title>'))) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Checks whether an extracted result is degraded (e.g. login wall placeholder,
+ * missing author details, empty media on profiles) to prevent cache pollution.
+ */
+export function isDegradedExtractionResult(platform: string | null | undefined, result: any): boolean {
+  if (!result) return true;
+  const p = (platform || '').toLowerCase();
+  const cardData = result.card_data || (result.result && result.result.card_data);
+  const title = (result.title || '').trim().toLowerCase();
+  const description = (result.description || '').trim();
+
+  if (p === 'instagram') {
+    if (cardData) {
+      const authorName = (cardData.author?.name || '').trim();
+      const hasMedia = Array.isArray(cardData.media) && cardData.media.length > 0;
+      // Degraded if author name is generic placeholder with no bio or media
+      if (authorName === 'Instagram User' && !description && !hasMedia) {
+        return true;
+      }
+      // Degraded if is_profile but both media and description are empty
+      if (cardData.is_profile && !hasMedia && !description) {
+        return true;
+      }
+    }
+    // Generic empty titles on Instagram without description
+    if ((title === 'instagram' || title === 'instagram post' || !title) && !description) {
+      return true;
+    }
+  }
+
+  if (p === 'twitter') {
+    if (cardData && (!result.title && !result.description)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+
 

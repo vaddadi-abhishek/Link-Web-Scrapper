@@ -4,6 +4,7 @@ import { deriveSiteName } from '../utils/siteName';
 import { validateUrlAgainstSSRF } from '../utils/ssrfValidator';
 import { canonicalizeUrl, isResolvableShortlink, resolveShortlink } from '../utils/urlFormatter';
 import { extractionCache } from '../utils/cache';
+import { isDegradedExtractionResult } from '../utils/textCleaner';
 import { logger } from '../utils/logger';
 
 const getUrlFromRequest = async (req: Request): Promise<string | null> => {
@@ -57,14 +58,19 @@ export const extractMetadataController = async (req: Request, res: Response): Pr
     if (!forceRefresh && !html) {
       const cachedResponse = extractionCache.get(metaCacheKey);
       if (cachedResponse) {
-        logger.info('ExtractController', `Instant Cache Hit (<1ms) for "${canonicalUrl}" (origin: "${rawUrl}")`);
-        res.status(200).json({
-          ...cachedResponse,
-          url: rawUrl, // Preserve original requested URL
-          canonical_url: canonicalUrl,
-          cached: true,
-        });
-        return;
+        if (isDegradedExtractionResult(cachedResponse.type, cachedResponse)) {
+          logger.info('ExtractController', `Purging degraded cached metadata for "${canonicalUrl}"`);
+          extractionCache.delete(metaCacheKey);
+        } else {
+          logger.info('ExtractController', `Instant Cache Hit (<1ms) for "${canonicalUrl}" (origin: "${rawUrl}")`);
+          res.status(200).json({
+            ...cachedResponse,
+            url: rawUrl, // Preserve original requested URL
+            canonical_url: canonicalUrl,
+            cached: true,
+          });
+          return;
+        }
       }
     }
 
@@ -88,8 +94,9 @@ export const extractMetadataController = async (req: Request, res: Response): Pr
         : null,
     };
 
-    // Cache pure metadata response (30-minute TTL)
-    if (!forceRefresh && !html && (result.title || result.description || result.card_data)) {
+    // Cache pure metadata response (30-minute TTL) strictly if NOT degraded
+    const isDegraded = isDegradedExtractionResult(platform, fullResponse);
+    if (!forceRefresh && !html && !isDegraded && (result.title || result.description || result.card_data)) {
       extractionCache.set(metaCacheKey, fullResponse);
     }
 

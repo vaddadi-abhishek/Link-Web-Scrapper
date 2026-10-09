@@ -1,7 +1,7 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { PlatformExtractor, ExtractionResult, InstagramCardData, MediaItem, sanitizeMetrics } from './types';
-import { scrapeWithCheerio } from '../cheerioScraper';
+import { scrapeWithCheerio, GOOGLEBOT_UA, BINGBOT_UA, TWITTERBOT_UA, FACEBOOK_UA } from '../cheerioScraper';
 import { playwrightEngine } from '../playwrightEngine';
 import { resolveUrl } from '../../utils/urlFormatter';
 import {
@@ -10,6 +10,7 @@ import {
   unescapeHtml,
   stripEngagementHeader,
   stripOuterQuotes,
+  isInstagramBlockedOrAuthWall,
 } from '../../utils/textCleaner';
 import { parseFormattedNumber } from '../../utils/numberParser';
 import { logger } from '../../utils/logger';
@@ -280,9 +281,10 @@ function extractInstagramProfileMediaFromHtml(html: string): MediaItem[] {
     $('img').each((_, el) => {
       if (media.length >= 6) return;
       const src = $(el).attr('src') || $(el).attr('data-src');
-      if (!src) return;
+      const alt = $(el).attr('alt') || '';
+      if (!src || alt.toLowerCase().includes('profile picture') || isAvatarUrl(src)) return;
       const cleaned = cleanMediaUrl(src);
-      if (!cleaned || seen.has(cleaned) || isAvatarUrl(cleaned)) return;
+      if (!cleaned || seen.has(cleaned)) return;
       seen.add(cleaned);
       media.push({ type: 'image', url: cleaned });
     });
@@ -378,22 +380,51 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
     let embedHtml = '';
     let crawlerHtml: string | null = cheerioData?.rawHtml || null;
 
-    // Resilient fallback: If crawler HTML was not captured by scrapeWithCheerio, fetch directly
-    if (!crawlerHtml) {
-      try {
-        const crawlerRes = await axios.get(normalizedUrl, {
-          headers: {
-            'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-          },
-          timeout: 4000,
-        });
-        if (typeof crawlerRes.data === 'string') {
-          crawlerHtml = crawlerRes.data;
+    // Resilient fallback: If crawler HTML was not captured by scrapeWithCheerio or was an auth wall, fetch directly
+    if (!crawlerHtml || crawlerHtml.length < 5000 || isInstagramBlockedOrAuthWall(crawlerHtml)) {
+      const candidateUas = [GOOGLEBOT_UA, BINGBOT_UA, TWITTERBOT_UA, FACEBOOK_UA];
+      for (const ua of candidateUas) {
+        try {
+          const crawlerRes = await axios.get(normalizedUrl, {
+            headers: {
+              'User-Agent': ua,
+              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+              'Accept-Language': 'en-US,en;q=0.9',
+            },
+            timeout: 4500,
+            maxRedirects: 4,
+            validateStatus: (status) => status >= 200 && status < 400,
+          });
+          if (typeof crawlerRes.data === 'string' && !isInstagramBlockedOrAuthWall(crawlerRes.data, crawlerRes.request?.res?.responseUrl)) {
+            crawlerHtml = crawlerRes.data;
+            break;
+          }
+        } catch {
+          // Continue to next crawler UA
         }
-      } catch {
-        // Continue with available data
+      }
+    }
+
+    // Recover title, description, and avatar from crawlerHtml if initial scrape was sparse
+    if (crawlerHtml) {
+      const $c = cheerio.load(crawlerHtml);
+      const cOgTitle = $c('meta[property="og:title"]').attr('content') || $c('title').text();
+      if (cOgTitle && (!title || title === 'Instagram' || title === 'Instagram Post')) {
+        title = cleanTitle(cOgTitle);
+      }
+      const cOgDesc = $c('meta[property="og:description"]').attr('content');
+      if (cOgDesc && (!description || description.trim() === '')) {
+        description = cOgDesc.trim();
+      }
+      const cOgImg = $c('meta[property="og:image"]').attr('content') || $c('img[alt*="profile picture"]').attr('src');
+      if (cOgImg && !image) {
+        image = cleanMediaUrl(cOgImg);
+      }
+      if ((!displayName || displayName === 'Instagram User') && title) {
+        const nameMatch = title.match(/^(.*?)\s*\(@/);
+        if (nameMatch && nameMatch[1]) {
+          displayName = nameMatch[1].trim();
+        }
       }
     }
 
@@ -736,12 +767,12 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
       }
     }
 
-    // Fallback for Avatar & Verified Status: Fast Profile Fetch using crawler headers
+    // Fallback for Avatar & Verified Status: Fast Profile Fetch using Googlebot
     if ((!embedAvatar || !isVerified) && username && username !== 'unknown') {
       try {
         const uRes = await axios.get(`https://www.instagram.com/${username}/`, {
           headers: {
-            'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
+            'User-Agent': GOOGLEBOT_UA,
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
           },
           timeout: 4000,
@@ -749,10 +780,11 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
         const userHtml = typeof uRes.data === 'string' ? uRes.data : '';
         const $u = cheerio.load(userHtml);
         const userOgImg = $u('meta[property="og:image"]').attr('content');
-        if (userOgImg && !embedAvatar) {
-          embedAvatar = cleanMediaUrl(userOgImg);
+        const userDomImg = $u('img[alt*="profile picture"]').attr('src');
+        if ((userOgImg || userDomImg) && !embedAvatar) {
+          embedAvatar = cleanMediaUrl(userOgImg || userDomImg || null);
         }
-        if (!isVerified && /"is_verified"\s*:\s*true/i.test(userHtml)) {
+        if (!isVerified && (/"is_verified"\s*:\s*true/i.test(userHtml) || userHtml.includes('InstagramVerified'))) {
           isVerified = true;
         }
       } catch {
@@ -760,8 +792,29 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
       }
     }
 
-    if (isProfile && !embedAvatar && image) {
-      embedAvatar = cleanMediaUrl(image);
+    if (isProfile && !embedAvatar) {
+      if (image) {
+        embedAvatar = cleanMediaUrl(image);
+      } else if (crawlerHtml) {
+        const $c = cheerio.load(crawlerHtml);
+        const ogImg = $c('meta[property="og:image"]').attr('content');
+        const domImg = $c('img[alt*="profile picture"]').attr('src');
+        if (ogImg || domImg) {
+          embedAvatar = cleanMediaUrl(ogImg || domImg || null);
+        }
+      }
+    }
+
+    if (!isVerified && crawlerHtml) {
+      if (
+        /"is_verified"\s*:\s*true/i.test(crawlerHtml) ||
+        crawlerHtml.includes('InstagramVerified') ||
+        (username !== 'unknown' &&
+          (new RegExp(`"username"\\s*:\\s*"${username}"[\\s\\S]{0,300}?"is_verified"\\s*:\\s*true`, 'i').test(crawlerHtml) ||
+           new RegExp(`"is_verified"\\s*:\\s*true[\\s\\S]{0,300}?"username"\\s*:\\s*"${username}"`, 'i').test(crawlerHtml)))
+      ) {
+        isVerified = true;
+      }
     }
 
     // Final clean pass on description to remove any residual prefixes/suffixes
@@ -840,7 +893,9 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
             title:
               pwData.title ||
               (isProfile && username !== 'unknown'
-                ? `${displayName} (@${username}) on Instagram`
+                ? displayName && displayName !== 'Instagram User'
+                  ? `${displayName} (@${username})`
+                  : `@${username} on Instagram`
                 : 'Instagram Post'),
             description: pwData.description || '',
             logo: pwData.logo || logo,
@@ -867,10 +922,12 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
 
     return {
       title:
-        title && title !== 'Instagram Post'
+        title && title !== 'Instagram Post' && title !== 'Instagram'
           ? title
           : isProfile && username !== 'unknown'
-            ? `${displayName} (@${username}) on Instagram`
+            ? displayName && displayName !== 'Instagram User'
+              ? `${displayName} (@${username})`
+              : `@${username} on Instagram`
             : username !== 'unknown'
               ? `Post by @${username} on Instagram`
               : 'Instagram Post',

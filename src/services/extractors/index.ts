@@ -10,7 +10,7 @@ import { globalWebExtractor } from './globalWeb';
 import { extractionCache } from '../../utils/cache';
 import { canonicalizeUrl, isResolvableShortlink, resolveShortlink } from '../../utils/urlFormatter';
 import { validateUrlAgainstSSRF } from '../../utils/ssrfValidator';
-import { isAccessDeniedOrChallenge } from '../../utils/textCleaner';
+import { isAccessDeniedOrChallenge, isDegradedExtractionResult } from '../../utils/textCleaner';
 import { logger } from '../../utils/logger';
 
 export * from './types';
@@ -76,11 +76,16 @@ export async function dispatchExtraction(
   if (!bypassCache) {
     const cached = extractionCache.get(cacheKey);
     if (cached) {
-      logger.debug('Extractor', `Cache hit for ${cacheKey}`);
-      return {
-        ...cached,
-        cached: true,
-      };
+      if (isDegradedExtractionResult(cached.platform, cached.result)) {
+        logger.debug('Extractor', `Purging degraded cached entry for ${cacheKey}`);
+        extractionCache.delete(cacheKey);
+      } else {
+        logger.debug('Extractor', `Cache hit for ${cacheKey}`);
+        return {
+          ...cached,
+          cached: true,
+        };
+      }
     }
   }
 
@@ -96,9 +101,10 @@ export async function dispatchExtraction(
     platform: result.type || (result.card_data as any)?.type || extractor.platformKey,
   };
 
-  // Cache successful extractions (30-minute default TTL)
+  // Cache successful extractions (30-minute default TTL) strictly if NOT blocked and NOT degraded
   const isBlocked = isAccessDeniedOrChallenge(result.title, result.description);
-  if (!bypassCache && !isBlocked && (result.title || result.description || result.card_data)) {
+  const isDegraded = isDegradedExtractionResult(response.platform, result);
+  if (!bypassCache && !isBlocked && !isDegraded && (result.title || result.description || result.card_data)) {
     extractionCache.set(cacheKey, response);
   }
 
