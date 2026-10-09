@@ -57,13 +57,20 @@ export interface FacebookCardData {
   author: {
     name: string;
     avatar_url: string | null;
+    verified?: boolean;
   };
   metrics: {
     likes?: number;
     comments?: number;
     shares?: number;
   } | null;
-  media: MediaItem[];
+  followers?: string | number | null;
+  following?: string | number | null;
+  is_profile?: boolean;
+  banner_url?: string | null;
+  category?: string | null;
+  media: MediaItem[] | null;
+  images?: string[] | null;
   posted_at: string | null;
   video_thumbnail?: string | null;
 }

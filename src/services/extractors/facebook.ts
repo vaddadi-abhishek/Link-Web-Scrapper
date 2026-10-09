@@ -79,6 +79,96 @@ function isFacebookPostImage(url: string | null): boolean {
   );
 }
 
+export function isFacebookProfileUrl(targetUrl: string): boolean {
+  if (!targetUrl) return false;
+  try {
+    const parsed = new URL(targetUrl);
+    if (!parsed.hostname.includes('facebook.com')) return false;
+
+    if (parsed.pathname === '/profile.php' && parsed.searchParams.has('id')) {
+      return true;
+    }
+
+    if (parsed.pathname.startsWith('/people/')) {
+      const parts = parsed.pathname.split('/').filter(Boolean);
+      if (parts.length >= 2 && !['posts', 'videos', 'photos', 'reels'].includes(parts[parts.length - 1])) {
+        return true;
+      }
+    }
+
+    const segments = parsed.pathname.split('/').filter(Boolean);
+    if (segments.length === 0) return false;
+
+    const systemPaths = new Set([
+      'watch',
+      'reel',
+      'reels',
+      'stories',
+      'story.php',
+      'photo',
+      'photo.php',
+      'photos',
+      'video',
+      'videos',
+      'share',
+      'permalink.php',
+      'groups',
+      'events',
+      'gaming',
+      'marketplace',
+      'login',
+      'login.php',
+      'help',
+      'settings',
+      'policies',
+      'recover',
+      'checkpoint',
+      'hashtag',
+      'search',
+      'dialog',
+      'plugins',
+    ]);
+
+    const firstSegment = segments[0].toLowerCase();
+    if (systemPaths.has(firstSegment)) return false;
+
+    if (segments.length === 1) return true;
+
+    if (segments.length === 2) {
+      const profileSubpages = new Set(['about', 'followers', 'following', 'photos', 'reels', 'videos', 'community']);
+      return profileSubpages.has(segments[1].toLowerCase());
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function formatMetricShorthand(val: string | number | undefined | null): string | null {
+  if (val === undefined || val === null || val === '') return null;
+  if (typeof val === 'string') {
+    const trimmed = val.trim();
+    if (/^[\d.]+[KMBkmb]?$/.test(trimmed)) return trimmed.toUpperCase();
+    const clean = trimmed.replace(/,/g, '');
+    const n = parseFloat(clean);
+    if (!isNaN(n)) val = n;
+    else return trimmed;
+  }
+  if (typeof val === 'number') {
+    if (val >= 1_000_000) {
+      const m = val / 1_000_000;
+      return `${Math.floor(m)}M`;
+    }
+    if (val >= 1_000) {
+      const k = val / 1_000;
+      return `${Math.floor(k)}K`;
+    }
+    return val.toString();
+  }
+  return null;
+}
+
 /**
  * Resolves a lookaside.fbsbx.com crawler URL into a direct scontent.*.fbcdn.net image URL
  * that renders directly in any browser without login/redirect issues.
@@ -103,40 +193,56 @@ async function resolveDirectFacebookCdnImage(mediaIdOrUrl: string): Promise<stri
 
   if (!mediaId) return mediaIdOrUrl;
 
-  try {
-    const photoUrl = `https://www.facebook.com/photo.php?fbid=${mediaId}`;
-    const res = await axios.get(photoUrl, {
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-      },
-      timeout: 5000,
-    });
+  const endpoints = [
+    {
+      url: `https://www.facebook.com/photo/?fbid=${mediaId}`,
+      ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1',
+    },
+    {
+      url: `https://m.facebook.com/photo.php?fbid=${mediaId}`,
+      ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1',
+    },
+    {
+      url: `https://www.facebook.com/photo.php?fbid=${mediaId}`,
+      ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    },
+  ];
 
-    const $ = cheerio.load(res.data);
-    const directImg = $('img[data-visualcompletion="media-vc-image"]').attr('src');
-    if (directImg && directImg.includes('scontent')) {
-      return directImg.replace(/&amp;/g, '&');
-    }
+  for (const ep of endpoints) {
+    try {
+      const res = await axios.get(ep.url, {
+        headers: {
+          'User-Agent': ep.ua,
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+        timeout: 4000,
+        maxRedirects: 5,
+      });
 
-    const matches = res.data.match(
-      /https:\/\/[^"'\s\\]*scontent[^"'\s\\]*(?:dst-jpg|\.jpg|\.png|\.webp)[^"'\s\\]*/g
-    );
-    if (matches && matches.length > 0) {
-      const cleanMatches = matches.map((m: string) =>
-        m
-          .replace(/\\u0025/g, '%')
-          .replace(/\\u0026/g, '&')
-          .replace(/\\\//g, '/')
-          .replace(/&amp;/g, '&')
+      const $ = cheerio.load(res.data);
+      const directImg = $('img[data-visualcompletion="media-vc-image"]').attr('src');
+      if (directImg && directImg.includes('scontent')) {
+        return directImg.replace(/&amp;/g, '&');
+      }
+
+      const matches = res.data.match(
+        /https:\/\/[^"'\s\\]*scontent[^"'\s\\]*(?:dst-jpg|\.jpg|\.png|\.webp)[^"'\s\\]*/g
       );
-      const postMatch = cleanMatches.find((m: string) => isFacebookPostImage(m));
-      return postMatch || cleanMatches[0];
+      if (matches && matches.length > 0) {
+        const cleanMatches = matches.map((item: string) =>
+          item
+            .replace(/\\u0025/g, '%')
+            .replace(/\\u0026/g, '&')
+            .replace(/\\\//g, '/')
+            .replace(/&amp;/g, '&')
+        );
+        const postMatch = cleanMatches.find((item: string) => isFacebookPostImage(item));
+        return postMatch || cleanMatches[0];
+      }
+    } catch {
+      // Try next endpoint
     }
-  } catch {
-    // Fall back to original URL
   }
 
   return mediaIdOrUrl;
@@ -488,10 +594,270 @@ async function resolveFacebookAuthorAvatar(
   return fallbackAvatar;
 }
 
+async function extractFacebookProfile(
+  targetUrl: string,
+  crawlerHtml: string,
+  finalUrl?: string | null
+): Promise<ExtractionResult<FacebookCardData>> {
+  let rawHtml = crawlerHtml || '';
+  const $ = cheerio.load(rawHtml);
+
+  // 1. Author Name
+  let name = $('meta[property="og:title"]').attr('content') || $('title').text() || 'Facebook User';
+  name = name.replace(/\s*\|\s*Facebook$/i, '').trim();
+  if (!name || name === 'Log in or sign up to view') {
+    const slugMatch = (finalUrl || targetUrl).match(/facebook\.com\/([a-zA-Z0-9.-]+)/i);
+    if (slugMatch && slugMatch[1]) {
+      name = slugMatch[1].replace(/[.-]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+    }
+  }
+
+  // 2. Verified status
+  let verified =
+    rawHtml.includes('"is_verified":true') ||
+    rawHtml.includes('"verification_status":"BLUE_VERIFIED"') ||
+    rawHtml.includes('"verification_status":"VERIFIED"') ||
+    rawHtml.includes('title="Verified account"') ||
+    rawHtml.includes('<title>Verified account</title>') ||
+    rawHtml.includes('aria-label="Verified account"');
+
+  // 3. Author Avatar
+  let authorAvatar: string | null = null;
+  const avatarMatch =
+    rawHtml.match(/"profile_picture":\s*\{[^}]*"uri":\s*"([^"]+)"/i) ||
+    rawHtml.match(/"profilePhoto":\s*\{[^}]*"uri":\s*"([^"]+)"/i);
+  if (avatarMatch && avatarMatch[1]) {
+    const cleanAv = avatarMatch[1]
+      .replace(/\\\//g, '/')
+      .replace(/\\u0025/g, '%')
+      .replace(/\\u0026/g, '&');
+    if (!cleanAv.includes('lookaside')) {
+      authorAvatar = cleanAv;
+    }
+  }
+  if (!authorAvatar) {
+    authorAvatar = await resolveFacebookAuthorAvatar(rawHtml, name, targetUrl, finalUrl);
+  }
+
+  // 4. Banner / Cover photo
+  let coverUri: string | null = null;
+  const coverMatch =
+    rawHtml.match(/"cover_photo":\s*\{[^}]*"image":\s*\{\s*"uri":\s*"([^"]+)"/i) ||
+    rawHtml.match(/"cover_photo":\s*\{[^}]*"photo":\s*\{[^}]*"image":\s*\{\s*"uri":\s*"([^"]+)"/i) ||
+    rawHtml.match(/"cover_photo":\s*\{[^}]*"id":\s*"(\d+)"/i) ||
+    rawHtml.match(/"profile_cover_photo":\s*\{[^}]*"uri":\s*"([^"]+)"/i) ||
+    rawHtml.match(/"header_photo":\s*\{[^}]*"uri":\s*"([^"]+)"/i);
+  if (coverMatch && coverMatch[1]) {
+    coverUri = coverMatch[1]
+      .replace(/\\\//g, '/')
+      .replace(/\\u0025/g, '%')
+      .replace(/\\u0026/g, '&');
+  }
+
+  let bannerUrl: string | null = null;
+  if (coverUri) {
+    bannerUrl = await resolveDirectFacebookCdnImage(coverUri);
+  }
+
+  // 5. Bio / Description
+  let bio: string | null = null;
+  const bioMatch =
+    rawHtml.match(/"best_description":\s*\{\s*"text":\s*"([^"]+)"/i) ||
+    rawHtml.match(/"bio_text":\s*\{\s*"text":\s*"([^"]+)"/i) ||
+    rawHtml.match(/"profile_bio":\s*\{\s*"text":\s*"([^"]+)"/i);
+  if (bioMatch && bioMatch[1]) {
+    bio = bioMatch[1]
+      .replace(/\\"/g, '"')
+      .replace(/\\n/g, '\n')
+      .replace(/\\r/g, '')
+      .replace(/\\t/g, ' ')
+      .replace(/\\u[\dA-F]{4}/gi, (m) => String.fromCharCode(parseInt(m.replace(/\\u/g, ''), 16)))
+      .trim();
+  }
+
+  if (!bio) {
+    const ogDesc = $('meta[property="og:description"]').attr('content') || '';
+    // Pattern: "Spider-Man. 19,920,702 followers · 80 talking about this. Welcome to the official..."
+    const stripped = ogDesc.replace(/^[^.]+\.\s*[\d,.]+[KMBkmb]?\s*(?:followers|likes)[^.]*\.\s*/i, '').trim();
+    if (stripped && !stripped.toLowerCase().includes('log in or sign up')) {
+      bio = stripped;
+    }
+  }
+
+  // 6. Followers & Following
+  let followers: string | null = null;
+  let following: string | null = null;
+
+  // Check JSON "text":"... followers"
+  const followersTextMatch =
+    rawHtml.match(/"text":\s*"([^\"]*followers[^\"]*)"/i) ||
+    rawHtml.match(/"follower_count":\s*(\d+)/i);
+  if (followersTextMatch && followersTextMatch[1]) {
+    const m = followersTextMatch[1].match(/([\d,.]+[KMBkmb]?)/i);
+    if (m) followers = formatMetricShorthand(m[1]);
+  }
+
+  if (!followers) {
+    const ogDesc = $('meta[property="og:description"]').attr('content') || '';
+    const m = ogDesc.match(/([\d,.]+[KMBkmb]?)\s*followers/i);
+    if (m) followers = formatMetricShorthand(m[1]);
+  }
+
+  const followingTextMatch =
+    rawHtml.match(/"text":\s*"([^\"]*following[^\"]*)"/i) ||
+    rawHtml.match(/"following_count":\s*(\d+)/i);
+  if (followingTextMatch && followingTextMatch[1]) {
+    const m = followingTextMatch[1].match(/([\d,.]+[KMBkmb]?)/i);
+    if (m) following = formatMetricShorthand(m[1]);
+  }
+
+  // 7. Category
+  let category: string | null = null;
+  const catMatch =
+    rawHtml.match(/"category_name":\s*"([^"]+)"/i) ||
+    rawHtml.match(/"page_category":\s*"([^"]+)"/i);
+  if (catMatch && catMatch[1]) {
+    category = catMatch[1]
+      .replace(/\\u[\dA-F]{4}/gi, (m) => String.fromCharCode(parseInt(m.replace(/\\u/g, ''), 16)))
+      .trim();
+  }
+
+  // 8. If Playwright is needed (e.g. bannerUrl or bio or followers missing)
+  if (!bannerUrl || !bio || !followers) {
+    try {
+      const pwResult = await playwrightEngine.scrape<any>(finalUrl || targetUrl, {
+        waitSelector: 'h1, [role="main"]',
+        waitTimeout: 2000,
+        timeout: 7000,
+        customEvaluator: async (page) => {
+          return await page.evaluate(() => {
+            const coverEl =
+              document.querySelector('img[data-imgperflogname="profileCoverPhoto"]') ||
+              document.querySelector('a[aria-label*="cover photo" i] img') ||
+              document.querySelector('a[href*="/photo/"] img');
+            const pwCover = coverEl ? (coverEl as HTMLImageElement).src : null;
+
+            let pwAvatar: string | null = null;
+            const svgImg = document.querySelector('svg image');
+            if (svgImg) {
+              pwAvatar = svgImg.getAttribute('xlink:href') || svgImg.getAttribute('href');
+            }
+            if (!pwAvatar) {
+              const profImg = document.querySelector('img[data-imgperflogname="profilePhoto"]');
+              if (profImg) pwAvatar = (profImg as HTMLImageElement).src;
+            }
+
+            const h1 = document.querySelector('h1');
+            const pwName = h1 ? h1.innerText.trim() : null;
+
+            const isVer = Boolean(
+              document.querySelector('svg title')?.textContent?.includes('Verified') ||
+              document.querySelector('svg[aria-label*="Verified" i]') ||
+              document.querySelector('[aria-label*="Verified account" i]')
+            );
+
+            let pwFollowers: string | null = null;
+            let pwFollowing: string | null = null;
+            const links = Array.from(document.querySelectorAll('a'));
+            for (const a of links) {
+              const href = a.getAttribute('href') || '';
+              const text = a.innerText.trim();
+              if (href.includes('/followers')) {
+                const m = text.match(/([\d,.]+[KMBkmb]?)/i);
+                if (m) pwFollowers = m[1];
+              } else if (href.includes('/following')) {
+                const m = text.match(/([\d,.]+[KMBkmb]?)/i);
+                if (m) pwFollowing = m[1];
+              }
+            }
+
+            let pwCategory: string | null = null;
+            const detailsList = document.querySelector('[aria-label="Highlighted details"]');
+            if (detailsList) {
+              pwCategory = (detailsList as HTMLElement).innerText.trim();
+            }
+
+            let pwBio: string | null = null;
+            const bioSpans = Array.from(document.querySelectorAll('span[dir="auto"]'));
+            for (const s of bioSpans) {
+              const txt = (s as HTMLElement).innerText?.trim();
+              if (
+                txt &&
+                txt.length > 15 &&
+                !txt.includes('followers') &&
+                !txt.includes('following') &&
+                !txt.includes('Message') &&
+                !txt.includes('Follow') &&
+                !txt.includes('Search') &&
+                !txt.includes('Log in')
+              ) {
+                pwBio = txt;
+                break;
+              }
+            }
+
+            return {
+              pwCover,
+              pwAvatar,
+              pwName,
+              isVer,
+              pwFollowers,
+              pwFollowing,
+              pwCategory,
+              pwBio,
+            };
+          });
+        },
+      });
+
+      if (pwResult.customData) {
+        const cd = pwResult.customData;
+        if (!bannerUrl && cd.pwCover) bannerUrl = cd.pwCover;
+        if ((!authorAvatar || authorAvatar.includes('ui-avatars')) && cd.pwAvatar) authorAvatar = cd.pwAvatar;
+        if (!name || name === 'Facebook User') if (cd.pwName) name = cd.pwName;
+        if (!verified && cd.isVer) verified = true;
+        if (!followers && cd.pwFollowers) followers = formatMetricShorthand(cd.pwFollowers);
+        if (!following && cd.pwFollowing) following = formatMetricShorthand(cd.pwFollowing);
+        if (!category && cd.pwCategory) category = cd.pwCategory;
+        if (!bio && cd.pwBio) bio = cd.pwBio;
+      }
+    } catch {
+      // Playwright fallback failed, keep static results
+    }
+  }
+
+  const finalBio = bio ? cleanDescription(bio) || null : null;
+
+  return {
+    title: null,
+    description: finalBio,
+    logo: FACEBOOK_LOGO_URL,
+    ogSiteName: 'Facebook',
+    card_data: {
+      author: {
+        name,
+        avatar_url: authorAvatar,
+        verified,
+      },
+      metrics: null,
+      followers,
+      following,
+      media: null,
+      images: null,
+      banner_url: bannerUrl,
+      category,
+      is_profile: true,
+      posted_at: new Date().toISOString(),
+      video_thumbnail: null,
+    },
+  };
+}
+
 export const facebookExtractor: PlatformExtractor<FacebookCardData> = {
   platformKey: 'facebook',
   async extract(targetUrl: string): Promise<ExtractionResult<FacebookCardData>> {
     let isVideo = isFacebookReelOrVideo(targetUrl);
+    let isProfile = isFacebookProfileUrl(targetUrl);
 
     let rawTitle: string | null = null;
     let rawDesc: string | null = null;
@@ -578,6 +944,25 @@ export const facebookExtractor: PlatformExtractor<FacebookCardData> = {
     if (crawlerRes && crawlerRes.data) {
       rawHtml = String(crawlerRes.data);
       finalUrl = crawlerRes.request?.res?.responseUrl || crawlerRes.config.url || targetUrl;
+
+      if (!isProfile) {
+        if (
+          rawHtml.includes('__isRenderedProfile') ||
+          rawHtml.includes('"profile_cover_photo"') ||
+          rawHtml.includes('profileCoverPhoto') ||
+          rawHtml.includes('"best_description"') ||
+          /og:description"[^>]*content="[^"]*followers[^"]*talking about this/i.test(rawHtml)
+        ) {
+          isProfile = true;
+        }
+      }
+    }
+
+    if (isProfile) {
+      return await extractFacebookProfile(targetUrl, rawHtml, finalUrl);
+    }
+
+    if (crawlerRes && crawlerRes.data) {
       const $ = cheerio.load(crawlerRes.data);
 
       if (!rawTitle) {
