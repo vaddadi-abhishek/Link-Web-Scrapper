@@ -334,6 +334,10 @@ export const GOOGLEBOT_UA =
   'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)';
 export const BINGBOT_UA =
   'Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)';
+export const APPLEBOT_UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15 (Applebot/0.1; +http://www.apple.com/bot.html)';
+export const DUCKDUCKBOT_UA = 'DuckDuckBot/1.0; (+http://duckduckgo.com/duckduckbot.html)';
+export const YANDEXBOT_UA = 'Mozilla/5.0 (compatible; YandexBot/3.0; +http://yandex.com/bots)';
 export const TWITTERBOT_UA = 'Twitterbot/1.0 (https://dev.twitter.com/cards/overview)';
 export const FACEBOOK_UA = 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)';
 export const WHATSAPP_UA = 'WhatsApp/2.21.12.21 A';
@@ -377,14 +381,22 @@ export async function scrapeWithCheerio(targetUrl: string): Promise<CheerioExtra
 
     let html: string | null = null;
 
-    // Instagram Specialization: Meta challenges datacenter IPs sending facebookexternalhit with login redirects.
-    // Googlebot, Bingbot, and Twitterbot are whitelisted by Meta for search indexing and receive full SSR HTML with OpenGraph tags.
+    // Instagram Specialization: Whitelisted search crawlers receive full SSR HTML with media timelines.
     if (isInstagram) {
-      const igCrawlers = [GOOGLEBOT_UA, BINGBOT_UA, TWITTERBOT_UA, FACEBOOK_UA, WHATSAPP_UA];
+      const igCrawlers = [
+        GOOGLEBOT_UA,
+        BINGBOT_UA,
+        APPLEBOT_UA,
+        DUCKDUCKBOT_UA,
+        FACEBOOK_UA,
+        YANDEXBOT_UA,
+        TWITTERBOT_UA,
+        WHATSAPP_UA,
+      ];
       for (const ua of igCrawlers) {
         try {
           const res = await axios.get(targetUrl, {
-            timeout: 4500,
+            timeout: 6000,
             maxContentLength: 5 * 1024 * 1024,
             httpAgent: sharedHttpAgent,
             httpsAgent: sharedHttpsAgent,
@@ -397,7 +409,15 @@ export async function scrapeWithCheerio(targetUrl: string): Promise<CheerioExtra
             const finalUrl = res.request?.res?.responseUrl;
             if (!isInstagramBlockedOrAuthWall(res.data, finalUrl) && !isAccessDeniedOrChallenge(null, null, res.data)) {
               html = res.data;
-              break;
+              // If this response contains the full timeline data (>1.2MB or polaris connection), we have the optimal payload
+              if (
+                html.includes('polaris_ordered_timeline_connection') ||
+                html.includes('polaris_timeline_connection') ||
+                html.length > 1200000
+              ) {
+                break;
+              }
+              // Otherwise, keep html as fallback but continue trying remaining timeline crawlers
             } else {
               logger.debug('CheerioScraper', `Instagram crawler ${ua.substring(0, 30)} received login wall or challenge, trying next...`);
             }

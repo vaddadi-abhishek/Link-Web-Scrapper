@@ -1,7 +1,16 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { PlatformExtractor, ExtractionResult, InstagramCardData, MediaItem, sanitizeMetrics } from './types';
-import { scrapeWithCheerio, GOOGLEBOT_UA, BINGBOT_UA, TWITTERBOT_UA, FACEBOOK_UA } from '../cheerioScraper';
+import {
+  scrapeWithCheerio,
+  GOOGLEBOT_UA,
+  BINGBOT_UA,
+  APPLEBOT_UA,
+  DUCKDUCKBOT_UA,
+  YANDEXBOT_UA,
+  TWITTERBOT_UA,
+  FACEBOOK_UA,
+} from '../cheerioScraper';
 import { playwrightEngine } from '../playwrightEngine';
 import { resolveUrl } from '../../utils/urlFormatter';
 import {
@@ -167,11 +176,22 @@ function extractInstagramVideo(embedHtml: string, rawHtml?: string | null): stri
   return null;
 }
 
-function isAvatarUrl(url: string): boolean {
+function isAvatarUrl(url: string, knownAvatarUrl?: string | null): boolean {
+  if (!url) return true;
+  if (knownAvatarUrl) {
+    const cleanKnown = knownAvatarUrl.split('?')[0];
+    const cleanUrl = url.split('?')[0];
+    if (cleanUrl === cleanKnown || url.includes(cleanKnown) || cleanKnown.includes(cleanUrl)) {
+      return true;
+    }
+  }
   const l = url.toLowerCase();
   return (
     l.includes('150x150') ||
     l.includes('s150x150') ||
+    l.includes('s100x100') ||
+    l.includes('s320x320') ||
+    l.includes('t51.82787-19') ||
     l.includes('profile_pic') ||
     l.includes('avatar') ||
     l.includes('rsrc.php')
@@ -210,7 +230,7 @@ function extractInstagramUsernameFromProfileUrl(targetUrl: string): string | nul
   return null;
 }
 
-function extractInstagramProfileMediaFromHtml(html: string): MediaItem[] {
+function extractInstagramProfileMediaFromHtml(html: string, knownAvatarUrl?: string | null): MediaItem[] {
   if (!html) return [];
   const media: MediaItem[] = [];
   const seen = new Set<string>();
@@ -237,7 +257,7 @@ function extractInstagramProfileMediaFromHtml(html: string): MediaItem[] {
             const uri = edge.node?.display_uri || edge.node?.image_versions2?.candidates?.[0]?.url;
             if (uri) {
               const cleaned = cleanMediaUrl(uri);
-              if (cleaned && !seen.has(cleaned) && !isAvatarUrl(cleaned)) {
+              if (cleaned && !seen.has(cleaned) && !isAvatarUrl(cleaned, knownAvatarUrl)) {
                 seen.add(cleaned);
                 media.push({ type: 'image', url: cleaned });
                 if (media.length >= 6) return media;
@@ -271,7 +291,7 @@ function extractInstagramProfileMediaFromHtml(html: string): MediaItem[] {
     const src = $(el).attr('src') || $(el).attr('data-src');
     if (!src) return;
     const cleaned = cleanMediaUrl(src);
-    if (!cleaned || seen.has(cleaned) || isAvatarUrl(cleaned)) return;
+    if (!cleaned || seen.has(cleaned) || isAvatarUrl(cleaned, knownAvatarUrl)) return;
     seen.add(cleaned);
     media.push({ type: 'image', url: cleaned });
   });
@@ -282,7 +302,7 @@ function extractInstagramProfileMediaFromHtml(html: string): MediaItem[] {
       if (media.length >= 6) return;
       const src = $(el).attr('src') || $(el).attr('data-src');
       const alt = $(el).attr('alt') || '';
-      if (!src || alt.toLowerCase().includes('profile picture') || isAvatarUrl(src)) return;
+      if (!src || alt.toLowerCase().includes('profile picture') || isAvatarUrl(src, knownAvatarUrl)) return;
       const cleaned = cleanMediaUrl(src);
       if (!cleaned || seen.has(cleaned)) return;
       seen.add(cleaned);
@@ -380,9 +400,24 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
     let embedHtml = '';
     let crawlerHtml: string | null = cheerioData?.rawHtml || null;
 
-    // Resilient fallback: If crawler HTML was not captured by scrapeWithCheerio or was an auth wall, fetch directly
-    if (!crawlerHtml || crawlerHtml.length < 5000 || isInstagramBlockedOrAuthWall(crawlerHtml)) {
-      const candidateUas = [GOOGLEBOT_UA, BINGBOT_UA, TWITTERBOT_UA, FACEBOOK_UA];
+    const hasTimeline = Boolean(
+      crawlerHtml &&
+      (crawlerHtml.includes('polaris_ordered_timeline_connection') ||
+        crawlerHtml.includes('polaris_timeline_connection') ||
+        crawlerHtml.length > 1200000)
+    );
+
+    // Resilient fallback: If crawler HTML was not captured by scrapeWithCheerio, was an auth wall, or (for profiles) missing the media timeline, fetch directly
+    if (!crawlerHtml || crawlerHtml.length < 5000 || isInstagramBlockedOrAuthWall(crawlerHtml) || (isProfile && !hasTimeline)) {
+      const candidateUas = [
+        GOOGLEBOT_UA,
+        BINGBOT_UA,
+        APPLEBOT_UA,
+        DUCKDUCKBOT_UA,
+        FACEBOOK_UA,
+        YANDEXBOT_UA,
+        TWITTERBOT_UA,
+      ];
       for (const ua of candidateUas) {
         try {
           const crawlerRes = await axios.get(normalizedUrl, {
@@ -391,13 +426,20 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
               'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
               'Accept-Language': 'en-US,en;q=0.9',
             },
-            timeout: 4500,
+            timeout: 6000,
             maxRedirects: 4,
             validateStatus: (status) => status >= 200 && status < 400,
           });
           if (typeof crawlerRes.data === 'string' && !isInstagramBlockedOrAuthWall(crawlerRes.data, crawlerRes.request?.res?.responseUrl)) {
             crawlerHtml = crawlerRes.data;
-            break;
+            if (
+              !isProfile ||
+              crawlerHtml.includes('polaris_ordered_timeline_connection') ||
+              crawlerHtml.includes('polaris_timeline_connection') ||
+              crawlerHtml.length > 1200000
+            ) {
+              break;
+            }
           }
         } catch {
           // Continue to next crawler UA
@@ -440,7 +482,7 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
     if (isProfile) {
       // 1. Crawler HTML: Parse visual grid media directly from SSR crawler HTML (<2ms, instantaneous)
       if (crawlerHtml && mediaList.length < 6) {
-        const fromCrawler = extractInstagramProfileMediaFromHtml(crawlerHtml);
+        const fromCrawler = extractInstagramProfileMediaFromHtml(crawlerHtml, image);
         for (const m of fromCrawler) {
           if (mediaList.length >= 6) break;
           if (!mediaList.some((existing) => existing.url === m.url)) {
@@ -451,7 +493,7 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
 
       // 2. Client provided requestHtml
       if (requestHtml && mediaList.length < 6) {
-        const fromRequestHtml = extractInstagramProfileMediaFromHtml(requestHtml);
+        const fromRequestHtml = extractInstagramProfileMediaFromHtml(requestHtml, image);
         for (const m of fromRequestHtml) {
           if (mediaList.length >= 6) break;
           if (!mediaList.some((existing) => existing.url === m.url)) {
@@ -576,7 +618,7 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
 
       // 3. Crawler HTML fallback if still incomplete
       if (mediaList.length < 6 && crawlerHtml) {
-        const fromCrawler = extractInstagramProfileMediaFromHtml(crawlerHtml);
+        const fromCrawler = extractInstagramProfileMediaFromHtml(crawlerHtml, embedAvatar || image);
         for (const m of fromCrawler) {
           if (mediaList.length >= 6) break;
           if (!mediaList.some((existing) => existing.url === m.url)) {
@@ -589,7 +631,7 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
           for (const match of cdnMatches) {
             if (mediaList.length >= 6) break;
             const cleaned = cleanMediaUrl(match[0]);
-            if (!cleaned || mediaList.some((m) => m.url === cleaned) || isAvatarUrl(cleaned)) continue;
+            if (!cleaned || mediaList.some((m) => m.url === cleaned) || isAvatarUrl(cleaned, embedAvatar || image)) continue;
             mediaList.push({ type: 'image', url: cleaned });
           }
         }

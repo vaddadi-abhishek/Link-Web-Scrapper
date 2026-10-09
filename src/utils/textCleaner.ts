@@ -279,9 +279,25 @@ export function isDegradedExtractionResult(platform: string | null | undefined, 
       if (authorName === 'Instagram User' && !description && !hasMedia) {
         return true;
       }
-      // Degraded if is_profile but both media and description are empty
-      if (cardData.is_profile && !hasMedia && !description) {
-        return true;
+      // Degraded if is_profile but media has no post images or contains only the avatar
+      if (cardData.is_profile) {
+        if (!hasMedia) {
+          return true;
+        }
+        if (cardData.media.length <= 1) {
+          const firstUrl = cardData.media[0]?.url || '';
+          const avatarUrl = cardData.author?.avatar_url || '';
+          if (
+            !firstUrl ||
+            firstUrl === avatarUrl ||
+            firstUrl.includes('t51.82787-19') ||
+            firstUrl.includes('s100x100') ||
+            firstUrl.includes('s150x150') ||
+            firstUrl.includes('profile_pic')
+          ) {
+            return true;
+          }
+        }
       }
     }
     // Generic empty titles on Instagram without description
