@@ -42,6 +42,8 @@ app.disable('x-powered-by');
 const rawAllowedOrigins = [
   process.env.FRONTEND_URL,
   ...(process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : []),
+  'https://usemindspace.online',
+  'https://www.usemindspace.online',
   'http://localhost:5173',
   'http://127.0.0.1:5173',
   'http://localhost:3000',
@@ -65,9 +67,10 @@ const corsOptions: cors.CorsOptions = {
     // Normalize origin: strip trailing slashes
     const cleanOrigin = origin.trim().replace(/\/+$/, '');
 
-    // Check if origin matches allowed list, local LAN, Mindspace Vercel deployments, or Chrome extension
+    // Check if origin matches allowed list, custom domain, local LAN, Mindspace Vercel deployments, or Chrome extension
     const isAllowed =
       allowedOrigins.includes(cleanOrigin) ||
+      /^https:\/\/(www\.)?usemindspace\.online$/i.test(cleanOrigin) ||
       /^http:\/\/192\.168\.\d+\.\d+(:\d+)?$/.test(cleanOrigin) ||
       /^http:\/\/localhost(:\d+)?$/.test(cleanOrigin) ||
       /^http:\/\/127\.0\.0\.1(:\d+)?$/.test(cleanOrigin) ||
@@ -82,12 +85,22 @@ const corsOptions: cors.CorsOptions = {
       callback(null, true);
     } else {
       logger.warn('CORS', `Blocked request from untrusted origin: ${origin}`);
-      callback(new Error('Not allowed by CORS'));
+      const corsError = new Error('Not allowed by CORS');
+      (corsError as any).status = 403;
+      callback(corsError);
     }
   },
   credentials: true,
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Auto-AI-Context', 'Prefer'],
-  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'X-Auto-AI-Context',
+    'Prefer',
+    'X-Requested-With',
+    'Accept',
+    'Origin',
+  ],
+  methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
   optionsSuccessStatus: 200,
 };
 

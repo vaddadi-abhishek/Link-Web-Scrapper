@@ -220,6 +220,8 @@ export async function getBookmarksController(req: AuthenticatedRequest, res: Res
   }
 }
 
+const inFlightBookmarkCreations = new Map<string, Promise<{ status: number; payload: any }>>();
+
 /**
  * POST /api/v1/bookmarks
  * Creates a bookmark, scrapes metadata, checks user credits, conditionally runs Gemini AI,
@@ -255,6 +257,30 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
       res.status(400).json({ error: 'Security Error: Invalid or internal URL provided (SSRF Blocked).' });
       return;
     }
+
+    // Server-side coalescing: If this user is already in the middle of scraping/inserting this exact canonical URL,
+    // wait for that existing operation to complete and return its result rather than creating duplicates.
+    const inFlightKey = `${userId}:${canonicalUrl}`;
+    const activePromise = inFlightBookmarkCreations.get(inFlightKey);
+    if (activePromise) {
+      logger.info('BookmarkController', `Coalescing in-flight bookmark creation for ${inFlightKey}`);
+      try {
+        const result = await activePromise;
+        res.status(result.status === 201 ? 200 : result.status).json({
+          ...result.payload,
+          already_exists: true,
+        });
+        return;
+      } catch {
+        // Fall through if initial creation threw
+      }
+    }
+
+    let resolveInFlight: ((val: { status: number; payload: any }) => void) | undefined;
+    const currentInFlightPromise = new Promise<{ status: number; payload: any }>((resolve) => {
+      resolveInFlight = resolve;
+    });
+    inFlightBookmarkCreations.set(inFlightKey, currentInFlightPromise);
 
     // Build comprehensive search list to catch canonical, effective, trimmed, and platform variations
     const searchUrls = Array.from(new Set([
@@ -371,10 +397,13 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
 
       logger.info('BookmarkController', `Duplicate URL posted by user ${userId}: ${canonicalUrl}. Returning existing bookmark (0 credits used).`);
       const finalBm = mapBookmarkRow(existingUserBm as BookmarkDbRow);
-      res.status(200).json({
+      const duplicatePayload = {
         ...finalBm,
         already_exists: true,
-      });
+      };
+      if (resolveInFlight) resolveInFlight({ status: 200, payload: duplicatePayload });
+      inFlightBookmarkCreations.delete(inFlightKey);
+      res.status(200).json(duplicatePayload);
       return;
     }
 
@@ -488,8 +517,15 @@ export async function createBookmarkController(req: AuthenticatedRequest, res: R
     }
 
     const finalResponse = mapBookmarkRow(bookmarkRow as BookmarkDbRow);
+    if (resolveInFlight) resolveInFlight({ status: 201, payload: finalResponse });
+    inFlightBookmarkCreations.delete(inFlightKey);
     res.status(201).json(finalResponse);
   } catch (err: unknown) {
+    const rawUrl = req.body?.url;
+    if (req.user?.id && rawUrl) {
+      const canonical = canonicalizeUrl(String(rawUrl).trim()) || String(rawUrl).trim();
+      inFlightBookmarkCreations.delete(`${req.user.id}:${canonical}`);
+    }
     const message = err instanceof Error ? err.message : String(err);
     logger.error('BookmarkController', 'Error creating bookmark:', message);
     res.status(500).json({ error: 'Internal server error while creating bookmark.' });
