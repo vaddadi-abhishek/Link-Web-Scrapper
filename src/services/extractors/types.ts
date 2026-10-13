@@ -27,7 +27,6 @@ export interface XCardData {
   article_content?: string | null;
   word_count?: number | null;
   reading_time_minutes?: number | null;
-  snapshot?: string | null;
   is_profile?: boolean;
   banner_url?: string | null;
   joined_date?: string | null;

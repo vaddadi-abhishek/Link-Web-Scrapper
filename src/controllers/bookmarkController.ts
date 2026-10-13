@@ -98,7 +98,7 @@ function mapBookmarkRow(row: BookmarkDbRow): BookmarkResponse {
     row.snapshot_url ||
     (typeof cardData?.snapshot === 'string' ? cardData.snapshot : null);
 
-  if (cardData && !cardData.snapshot && resolvedSnapshotUrl) {
+  if ((!row.type || row.type === 'generic') && cardData && !cardData.snapshot && resolvedSnapshotUrl) {
     cardData.snapshot = resolvedSnapshotUrl;
   }
   if (!cardData && resolvedSnapshotUrl) {

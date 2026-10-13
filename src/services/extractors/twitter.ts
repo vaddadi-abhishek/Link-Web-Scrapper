@@ -1295,14 +1295,6 @@ async function tryFxTwitterApi(tweetId: string, targetUrl: string): Promise<Extr
       }
     }
 
-    const snapshot =
-      mediaList[0]?.url ||
-      tweet.media?.photos?.[0]?.url ||
-      tweet.media?.videos?.[0]?.thumbnail_url ||
-      tweet.quote?.media?.photos?.[0]?.url ||
-      tweet.quote?.media?.videos?.[0]?.thumbnail_url ||
-      null;
-
     const metrics: XCardData['metrics'] = {};
     if (tweet.replies !== undefined && tweet.replies !== null) metrics.replies = parseMetricValue(tweet.replies);
     if (tweet.retweets !== undefined && tweet.retweets !== null) metrics.reposts = parseMetricValue(tweet.retweets);
@@ -1321,7 +1313,6 @@ async function tryFxTwitterApi(tweetId: string, targetUrl: string): Promise<Extr
         tweet.media?.videos?.[0]?.thumbnail_url ||
         tweet.quote?.media?.videos?.[0]?.thumbnail_url ||
         tweet.media?.photos?.[0]?.url ||
-        snapshot ||
         null;
     }
 
@@ -1355,7 +1346,6 @@ async function tryFxTwitterApi(tweetId: string, targetUrl: string): Promise<Extr
         media: mediaList.length > 0 ? mediaList : null,
         posted_at: postedAt,
         video_thumbnail: videoThumbnail,
-        snapshot,
         ...(isArticle
           ? {
               type: 'article',
@@ -1474,7 +1464,6 @@ async function tryTwitterSyndicationApi(tweetId: string, targetUrl: string): Pro
         media: mediaList.length > 0 ? mediaList : null,
         posted_at: data.created_at ? new Date(data.created_at).toISOString() : new Date().toISOString(),
         video_thumbnail: null,
-        snapshot: mediaList[0]?.url || null,
         ...(isArticle
           ? {
               type: 'article',
@@ -1546,8 +1535,6 @@ async function tryVxTwitterApi(tweetId: string, targetUrl: string): Promise<Extr
       }
     }
 
-    const snapshot = mediaList[0]?.url || null;
-
     const metrics: XCardData['metrics'] = {};
     if (data.replies !== undefined && data.replies !== null) metrics.replies = parseMetricValue(data.replies);
     if (data.retweets !== undefined && data.retweets !== null) metrics.reposts = parseMetricValue(data.retweets);
@@ -1565,7 +1552,6 @@ async function tryVxTwitterApi(tweetId: string, targetUrl: string): Promise<Extr
         (typeof vidObj?.thumbnail_url === 'string' ? vidObj.thumbnail_url : null) ||
         data.mediaURLs?.[0] ||
         data.qrt?.mediaURLs?.[0] ||
-        snapshot ||
         null;
     }
 
