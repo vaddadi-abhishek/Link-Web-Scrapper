@@ -155,6 +155,8 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
 // Server Initialization
 const server = app.listen(PORT, () => {
   logger.info('App', `Bookmark Extractor API listening on port ${PORT}`);
+  // Proactively warm up Playwright Chromium in the background to eliminate cold-start latency
+  playwrightEngine.warmup().catch(() => {});
 });
 
 // Graceful Shutdown Handler

@@ -381,50 +381,27 @@ export async function scrapeWithCheerio(targetUrl: string): Promise<CheerioExtra
 
     let html: string | null = null;
 
-    // Instagram Specialization: Whitelisted search crawlers receive full SSR HTML with media timelines.
+    // Instagram Specialization: Whitelisted search crawler receives SSR HTML with metadata (<500ms)
     if (isInstagram) {
-      const igCrawlers = [
-        GOOGLEBOT_UA,
-        BINGBOT_UA,
-        APPLEBOT_UA,
-        DUCKDUCKBOT_UA,
-        FACEBOOK_UA,
-        YANDEXBOT_UA,
-        TWITTERBOT_UA,
-        WHATSAPP_UA,
-      ];
-      for (const ua of igCrawlers) {
-        try {
-          const res = await axios.get(targetUrl, {
-            timeout: 6000,
-            maxContentLength: 5 * 1024 * 1024,
-            httpAgent: sharedHttpAgent,
-            httpsAgent: sharedHttpsAgent,
-            headers: buildScraperHeaders(ua),
-            maxRedirects: 4,
-            validateStatus: (status) => status >= 200 && status < 400,
-          });
+      try {
+        const res = await axios.get(targetUrl, {
+          timeout: 2500,
+          maxContentLength: 5 * 1024 * 1024,
+          httpAgent: sharedHttpAgent,
+          httpsAgent: sharedHttpsAgent,
+          headers: buildScraperHeaders(GOOGLEBOT_UA),
+          maxRedirects: 4,
+          validateStatus: (status) => status >= 200 && status < 400,
+        });
 
-          if (typeof res.data === 'string') {
-            const finalUrl = res.request?.res?.responseUrl;
-            if (!isInstagramBlockedOrAuthWall(res.data, finalUrl) && !isAccessDeniedOrChallenge(null, null, res.data)) {
-              html = res.data;
-              // If this response contains the full timeline data (>1.2MB or polaris connection), we have the optimal payload
-              if (
-                html.includes('polaris_ordered_timeline_connection') ||
-                html.includes('polaris_timeline_connection') ||
-                html.length > 1200000
-              ) {
-                break;
-              }
-              // Otherwise, keep html as fallback but continue trying remaining timeline crawlers
-            } else {
-              logger.debug('CheerioScraper', `Instagram crawler ${ua.substring(0, 30)} received login wall or challenge, trying next...`);
-            }
+        if (typeof res.data === 'string') {
+          const finalUrl = res.request?.res?.responseUrl;
+          if (!isInstagramBlockedOrAuthWall(res.data, finalUrl) && !isAccessDeniedOrChallenge(null, null, res.data)) {
+            html = res.data;
           }
-        } catch (igErr: unknown) {
-          logger.debug('CheerioScraper', `Instagram crawler error with ${ua.substring(0, 30)}:`, igErr instanceof Error ? igErr.message : String(igErr));
         }
+      } catch (igErr: unknown) {
+        logger.debug('CheerioScraper', 'Instagram crawler error:', igErr instanceof Error ? igErr.message : String(igErr));
       }
     } else {
       const primaryUa = (isTwitterOrX || isReddit)
@@ -439,7 +416,7 @@ export async function scrapeWithCheerio(targetUrl: string): Promise<CheerioExtra
 
       try {
         const response = await axios.get(targetUrl, {
-          timeout: 4000,
+          timeout: 2500,
           maxContentLength: 5 * 1024 * 1024,
           httpAgent: sharedHttpAgent,
           httpsAgent: sharedHttpsAgent,
@@ -459,7 +436,7 @@ export async function scrapeWithCheerio(targetUrl: string): Promise<CheerioExtra
       if (!html || isAccessDeniedOrChallenge(null, null, html)) {
         try {
           const fallbackRes = await axios.get(targetUrl, {
-            timeout: 4000,
+            timeout: 2000,
             maxContentLength: 5 * 1024 * 1024,
             httpAgent: sharedHttpAgent,
             httpsAgent: sharedHttpsAgent,

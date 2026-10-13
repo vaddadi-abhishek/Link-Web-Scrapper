@@ -49,6 +49,15 @@ const BLOCKED_TRACKER_PATTERNS = [
   'doubleclick.net',
   'clarity.ms',
   'hotjar.com',
+  'facebook.com/tr/',
+  'instagram.com/logging/',
+  'graph.instagram.com/logging',
+  'b-graph.facebook.com',
+  'stats.wp.com',
+  'scorecardresearch.com',
+  'adnxs.com',
+  'criteo.com',
+  'amazon-adsystem.com',
 ];
 
 class PlaywrightEngine {
@@ -64,6 +73,18 @@ class PlaywrightEngine {
       PlaywrightEngine.instance = new PlaywrightEngine();
     }
     return PlaywrightEngine.instance;
+  }
+
+  /**
+   * Proactively boots Chromium in the background to eliminate cold-start latency.
+   */
+  public async warmup(): Promise<void> {
+    try {
+      await this.getBrowser();
+      logger.info('PlaywrightEngine', 'Chromium pre-warmed and ready in background.');
+    } catch (err) {
+      logger.warn('PlaywrightEngine', `Chromium pre-warming failed: ${(err as Error).message}`);
+    }
   }
 
   /**
@@ -192,24 +213,21 @@ class PlaywrightEngine {
         return route.continue().catch(() => {});
       });
 
-      // Navigate to target URL with configurable or default timeout
+      // Navigate to target URL with configurable or fast default timeout (4500ms)
       const response = await page.goto(targetUrl, {
         waitUntil: 'domcontentloaded',
-        timeout: options.timeout || 7000,
+        timeout: options.timeout || 4500,
       });
 
-      // Wait for target selector if specified with strict timeout
+      // Wait for target selector if specified with strict timeout (1200ms default)
       if (options.waitSelector) {
         await page
           .waitForSelector(options.waitSelector, {
             state: 'attached',
-            timeout: options.waitTimeout || 2000,
+            timeout: options.waitTimeout || 1200,
           })
           .catch(() => {});
       }
-
-      // Fast hydration pause
-      await page.waitForTimeout(100);
 
       // -------------------------------------------------------------
       // DOM Metadata Extraction

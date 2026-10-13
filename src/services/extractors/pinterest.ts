@@ -174,7 +174,8 @@ export const pinterestExtractor: PlatformExtractor<PinterestCardData> = {
     // 2. Playwright Fallback: Headless browser for JS-rendered pins
     try {
       const pwData = await playwrightEngine.scrape(targetUrl, {
-        waitTimeout: 2500,
+        waitTimeout: 1200,
+        timeout: 4500,
         includeHtml: true,
       });
 

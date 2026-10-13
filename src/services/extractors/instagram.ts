@@ -319,8 +319,30 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
     // Normalize /reels/ to /reel/ for consistent crawler and embed resolution
     const normalizedUrl = targetUrl.replace(/\/reels\//i, '/reel/');
 
-    // Fast-Path using Axios & Cheerio with Meta Crawler User-Agent (~200ms)
-    const cheerioData = await scrapeWithCheerio(normalizedUrl);
+    const shortcodeMatch = normalizedUrl.match(/\/(?:reel|reels|p|tv)\/([a-zA-Z0-9_-]+)/i);
+    const shortcode = shortcodeMatch ? shortcodeMatch[1] : null;
+    const isProfile = !shortcode && isInstagramProfileUrl(targetUrl);
+
+    // Parallel fetch: For posts/reels, concurrently query the Instagram embed endpoint (<400ms) with Cheerio
+    let embedRes: any = null;
+    let cheerioData: any = null;
+
+    if (shortcode) {
+      const embedPromise = axios
+        .get(`https://www.instagram.com/p/${shortcode}/embed/captioned/`, {
+          headers: {
+            'User-Agent':
+              'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+          },
+          timeout: 3500,
+        })
+        .catch(() => null);
+
+      const cheerioPromise = scrapeWithCheerio(normalizedUrl);
+      [embedRes, cheerioData] = await Promise.all([embedPromise, cheerioPromise]);
+    } else {
+      cheerioData = await scrapeWithCheerio(normalizedUrl);
+    }
 
     let title = cheerioData?.title || null;
     let description = cheerioData?.description || null;
@@ -391,13 +413,9 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
       }
     }
 
-    // Extract Reel/Post video & carousel image URLs via Instagram embed fast-path
-    const shortcodeMatch = normalizedUrl.match(/\/(?:reel|reels|p|tv)\/([a-zA-Z0-9_-]+)/i);
-    const shortcode = shortcodeMatch ? shortcodeMatch[1] : null;
-    const isProfile = !shortcode && isInstagramProfileUrl(targetUrl);
     const mediaList: MediaItem[] = [];
     let embedAvatar: string | null = null;
-    let embedHtml = '';
+    let embedHtml = String(embedRes?.data || '');
     let crawlerHtml: string | null = cheerioData?.rawHtml || null;
 
     const hasTimeline = Boolean(
@@ -407,43 +425,24 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
         crawlerHtml.length > 1200000)
     );
 
-    // Resilient fallback: If crawler HTML was not captured by scrapeWithCheerio, was an auth wall, or (for profiles) missing the media timeline, fetch directly
-    if (!crawlerHtml || crawlerHtml.length < 5000 || isInstagramBlockedOrAuthWall(crawlerHtml) || (isProfile && !hasTimeline)) {
-      const candidateUas = [
-        GOOGLEBOT_UA,
-        BINGBOT_UA,
-        APPLEBOT_UA,
-        DUCKDUCKBOT_UA,
-        FACEBOOK_UA,
-        YANDEXBOT_UA,
-        TWITTERBOT_UA,
-      ];
-      for (const ua of candidateUas) {
-        try {
-          const crawlerRes = await axios.get(normalizedUrl, {
-            headers: {
-              'User-Agent': ua,
-              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-              'Accept-Language': 'en-US,en;q=0.9',
-            },
-            timeout: 6000,
-            maxRedirects: 4,
-            validateStatus: (status) => status >= 200 && status < 400,
-          });
-          if (typeof crawlerRes.data === 'string' && !isInstagramBlockedOrAuthWall(crawlerRes.data, crawlerRes.request?.res?.responseUrl)) {
-            crawlerHtml = crawlerRes.data;
-            if (
-              !isProfile ||
-              crawlerHtml.includes('polaris_ordered_timeline_connection') ||
-              crawlerHtml.includes('polaris_timeline_connection') ||
-              crawlerHtml.length > 1200000
-            ) {
-              break;
-            }
-          }
-        } catch {
-          // Continue to next crawler UA
+    // Fast Profile Fallback: Only if SSR crawler HTML is missing the media timeline, try ONE fast Googlebot request (<2s)
+    if (isProfile && !hasTimeline) {
+      try {
+        const crawlerRes = await axios.get(normalizedUrl, {
+          headers: {
+            'User-Agent': GOOGLEBOT_UA,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+          },
+          timeout: 2500,
+          maxRedirects: 4,
+          validateStatus: (status) => status >= 200 && status < 400,
+        });
+        if (typeof crawlerRes.data === 'string' && !isInstagramBlockedOrAuthWall(crawlerRes.data, crawlerRes.request?.res?.responseUrl)) {
+          crawlerHtml = crawlerRes.data;
         }
+      } catch {
+        // Fast fail directly to Playwright without burning seconds on blocked UAs
       }
     }
 
@@ -507,8 +506,8 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
         try {
           const pwData = await playwrightEngine.scrape<string[]>(normalizedUrl, {
             waitSelector: 'a[href*="/p/"], a[href*="/reel/"], div._aagu, div._aagv, main',
-            waitTimeout: 2000,
-            timeout: 8000,
+            waitTimeout: 1200,
+            timeout: 5000,
             includeHtml: true,
             customEvaluator: async (page) => {
               return await page.evaluate(() => {
@@ -640,14 +639,16 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
 
     if (shortcode) {
       try {
-        const embedRes = await axios.get(`https://www.instagram.com/p/${shortcode}/embed/captioned/`, {
-          headers: {
-            'User-Agent':
-              'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
-          },
-          timeout: 6000,
-        });
-        embedHtml = String(embedRes.data || '');
+        if (!embedHtml) {
+          const fallbackEmbedRes = await axios.get(`https://www.instagram.com/p/${shortcode}/embed/captioned/`, {
+            headers: {
+              'User-Agent':
+                'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+            },
+            timeout: 3000,
+          });
+          embedHtml = String(fallbackEmbedRes.data || '');
+        }
         const $embed = cheerio.load(embedHtml);
 
         // 1. Extract Carousel (edge_sidecar_to_children)
@@ -855,15 +856,15 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
       }
     }
 
-    // Fallback for Avatar & Verified Status: Fast Profile Fetch using Googlebot (only if still missing)
-    if ((!embedAvatar || !isVerified) && username && username !== 'unknown') {
+    // Fallback for Avatar: Fast Profile Fetch using Googlebot (only if avatar is still missing)
+    if (!embedAvatar && username && username !== 'unknown') {
       try {
         const uRes = await axios.get(`https://www.instagram.com/${username}/`, {
           headers: {
             'User-Agent': GOOGLEBOT_UA,
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
           },
-          timeout: 4000,
+          timeout: 1800,
         });
         const userHtml = typeof uRes.data === 'string' ? uRes.data : '';
         const $u = cheerio.load(userHtml);
@@ -901,7 +902,7 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
         verified: isVerified,
       },
       metrics: sanitizeMetrics(metrics),
-      media: mediaList,
+      media: mediaList.length > 0 ? mediaList : null,
       posted_at: publishedAt || new Date().toISOString(),
       video_thumbnail: videoThumbnail,
       is_profile: isProfile,
@@ -912,7 +913,8 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
       try {
         const pwData = await playwrightEngine.scrape<string[]>(targetUrl, {
           waitSelector: isProfile ? 'div._aagu, div._aagv, div.xg7h5cd, main' : 'article, main',
-          waitTimeout: 2500,
+          waitTimeout: 1200,
+          timeout: 5000,
           customEvaluator: isProfile
             ? async (page) => {
                 return await page.evaluate(() => {
@@ -971,7 +973,7 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
                 verified: isVerified,
               },
               metrics: sanitizeMetrics(metrics),
-              media: pwMedia,
+              media: pwMedia && pwMedia.length > 0 ? pwMedia : null,
               posted_at: pwData.publishedAt || publishedAt || new Date().toISOString(),
               video_thumbnail: pwHasVideo ? (pwData.snapshot || finalSnapshot) : null,
               is_profile: isProfile,

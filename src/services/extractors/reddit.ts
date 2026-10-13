@@ -540,22 +540,16 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
     isTruncatedDescription = isTruncatedText(description);
 
     const isMissingKeyData =
-      isCommentUrl ||
-      !author ||
-      author.includes('_user') ||
-      !description ||
-      isTruncatedDescription ||
-      (!upvotes && !comments) ||
-      !subredditIcon ||
-      subredditIcon.includes('ui-avatars') ||
-      mediaList.length === 0;
+      isCommentUrl
+        ? (!description || !author || author.includes('_user'))
+        : (!title || !author || author.includes('_user') || (isTruncatedDescription && (!description || description.length < 50)));
 
     if (isMissingKeyData) {
       try {
         const pwResult = await playwrightEngine.scrape<any>(canonicalUrl, {
           waitSelector: isCommentUrl ? 'shreddit-comment, shreddit-post' : 'shreddit-post',
-          waitTimeout: 5000,
-          timeout: 10000,
+          waitTimeout: 1500,
+          timeout: 5000,
           customEvaluator: async (page) => {
             return await page.evaluate((cId) => {
               const sp = document.querySelector('shreddit-post');

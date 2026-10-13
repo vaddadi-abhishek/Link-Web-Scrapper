@@ -84,7 +84,8 @@ export const globalWebExtractor: PlatformExtractor<GlobalWebCardData> = {
     // 2. Playwright Fallback: Headless browser (<2s, styles/images blocked) for JS-rendered SPAs or blocked requests
     try {
       const pwData = await playwrightEngine.scrape(targetUrl, {
-        waitTimeout: 2000,
+        waitTimeout: 1200,
+        timeout: 4500,
         includeHtml: true,
       });
 

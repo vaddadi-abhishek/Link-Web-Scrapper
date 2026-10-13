@@ -193,56 +193,44 @@ async function resolveDirectFacebookCdnImage(mediaIdOrUrl: string): Promise<stri
 
   if (!mediaId) return mediaIdOrUrl;
 
-  const endpoints = [
-    {
-      url: `https://www.facebook.com/photo/?fbid=${mediaId}`,
-      ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1',
-    },
-    {
-      url: `https://m.facebook.com/photo.php?fbid=${mediaId}`,
-      ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1',
-    },
-    {
-      url: `https://www.facebook.com/photo.php?fbid=${mediaId}`,
-      ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    },
-  ];
+  const ep = {
+    url: `https://m.facebook.com/photo.php?fbid=${mediaId}`,
+    ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1',
+  };
 
-  for (const ep of endpoints) {
-    try {
-      const res = await axios.get(ep.url, {
-        headers: {
-          'User-Agent': ep.ua,
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.9',
-        },
-        timeout: 4000,
-        maxRedirects: 5,
-      });
+  try {
+    const res = await axios.get(ep.url, {
+      headers: {
+        'User-Agent': ep.ua,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+      timeout: 1500,
+      maxRedirects: 4,
+    });
 
-      const $ = cheerio.load(res.data);
-      const directImg = $('img[data-visualcompletion="media-vc-image"]').attr('src');
-      if (directImg && directImg.includes('scontent')) {
-        return directImg.replace(/&amp;/g, '&');
-      }
-
-      const matches = res.data.match(
-        /https:\/\/[^"'\s\\]*scontent[^"'\s\\]*(?:dst-jpg|\.jpg|\.png|\.webp)[^"'\s\\]*/g
-      );
-      if (matches && matches.length > 0) {
-        const cleanMatches = matches.map((item: string) =>
-          item
-            .replace(/\\u0025/g, '%')
-            .replace(/\\u0026/g, '&')
-            .replace(/\\\//g, '/')
-            .replace(/&amp;/g, '&')
-        );
-        const postMatch = cleanMatches.find((item: string) => isFacebookPostImage(item));
-        return postMatch || cleanMatches[0];
-      }
-    } catch {
-      // Try next endpoint
+    const $ = cheerio.load(res.data);
+    const directImg = $('img[data-visualcompletion="media-vc-image"]').attr('src');
+    if (directImg && directImg.includes('scontent')) {
+      return directImg.replace(/&amp;/g, '&');
     }
+
+    const matches = res.data.match(
+      /https:\/\/[^"'\s\\]*scontent[^"'\s\\]*(?:dst-jpg|\.jpg|\.png|\.webp)[^"'\s\\]*/g
+    );
+    if (matches && matches.length > 0) {
+      const cleanMatches = matches.map((item: string) =>
+        item
+          .replace(/\\u0025/g, '%')
+          .replace(/\\u0026/g, '&')
+          .replace(/\\\//g, '/')
+          .replace(/&amp;/g, '&')
+      );
+      const postMatch = cleanMatches.find((item: string) => isFacebookPostImage(item));
+      return postMatch || cleanMatches[0];
+    }
+  } catch {
+    // Fast fallback
   }
 
   return mediaIdOrUrl;
@@ -550,14 +538,14 @@ async function resolveFacebookAuthorAvatar(
   const uniqueCandidates = Array.from(new Set(candidates))
     .filter(Boolean)
     .sort((a, b) => (/^\d+$/.test(b) ? 1 : 0) - (/^\d+$/.test(a) ? 1 : 0))
-    .slice(0, 2);
+    .slice(0, 1);
 
   for (const slugOrId of uniqueCandidates) {
     // 1. Try public Graph API
     try {
       const gRes = await axios.get(
         `https://graph.facebook.com/${encodeURIComponent(slugOrId)}/picture?type=large&redirect=false`,
-        { timeout: 2000 }
+        { timeout: 1200 }
       );
       if (gRes.data?.data?.url && !gRes.data.data.is_silhouette) {
         const resolved = gRes.data.data.url;
@@ -576,7 +564,7 @@ async function resolveFacebookAuthorAvatar(
           'Accept-Language': 'en-US,en;q=0.9',
         },
         maxRedirects: 5,
-        timeout: 2000,
+        timeout: 1200,
       });
       const $ = cheerio.load(mRes.data);
       const ogImg = $('meta[property="og:image"]').attr('content') || $('meta[property="og:image:secure_url"]').attr('content');
@@ -727,8 +715,8 @@ async function extractFacebookProfile(
     try {
       const pwResult = await playwrightEngine.scrape<any>(finalUrl || targetUrl, {
         waitSelector: 'h1, [role="main"]',
-        waitTimeout: 2000,
-        timeout: 7000,
+        waitTimeout: 1000,
+        timeout: 4500,
         customEvaluator: async (page) => {
           return await page.evaluate(() => {
             const coverEl =
@@ -1145,14 +1133,14 @@ export const facebookExtractor: PlatformExtractor<FacebookCardData> = {
     }
 
     // For Reels and Videos, Facebook SSR payloads omit share counts.
-    // If shares is 0 or null, fetch live action bar metrics via Playwright evaluator.
-    if (isVideo && (!metrics?.shares)) {
+    // Only invoke Playwright if essential metadata (videoUrl or rawTitle) is missing
+    if (isVideo && (!videoUrl || !rawTitle) && (!metrics?.shares)) {
       try {
         const pwTarget = finalUrl || targetUrl;
         const pwMetrics = await playwrightEngine.scrape<any>(pwTarget, {
           waitSelector: '[role="button"]',
-          waitTimeout: 2000,
-          timeout: 8000,
+          waitTimeout: 1000,
+          timeout: 4000,
           userAgent:
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
           customEvaluator: async (page) => {

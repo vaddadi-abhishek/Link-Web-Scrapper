@@ -1697,8 +1697,8 @@ export const twitterExtractor: PlatformExtractor<XCardData> = {
       try {
         const pwData = await playwrightEngine.scrape(targetUrl, {
           waitSelector: '[data-testid="UserName"], [data-testid="UserAvatar-Container"]',
-          waitTimeout: 4000,
-          timeout: 8000,
+          waitTimeout: 1500,
+          timeout: 5000,
           includeHtml: true,
         });
         if (pwData.html) {
@@ -1769,8 +1769,8 @@ export const twitterExtractor: PlatformExtractor<XCardData> = {
     try {
       const pwData = await playwrightEngine.scrape(targetUrl, {
         waitSelector: 'article[data-testid="tweet"], article',
-        waitTimeout: 4000,
-        timeout: 8000,
+        waitTimeout: 1500,
+        timeout: 5000,
         includeHtml: true,
       });
 
