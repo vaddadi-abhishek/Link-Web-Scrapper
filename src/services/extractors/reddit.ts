@@ -338,6 +338,120 @@ function cleanRedditTitle(raw: string | null | undefined): string {
 }
 
 // -------------------------------------------------------------
+// Tier 2.5: Official Reddit Embed Parser (<800ms, Full Body)
+// Publicly accessible via embed.reddit.com with zero bot challenges
+// -------------------------------------------------------------
+interface EmbedRedditResult {
+  description: string | null;
+  author: string | null;
+  subredditIcon: string | null;
+  upvotes: number | null;
+  comments: number | null;
+  createdAt: string | null;
+}
+
+async function tryEmbedReddit(
+  subreddit: string,
+  postId: string,
+  commentId?: string | null
+): Promise<EmbedRedditResult | null> {
+  try {
+    const cleanSub = subreddit.replace(/^r\//i, '').trim();
+    if (!cleanSub) return null;
+
+    const url = commentId
+      ? `https://embed.reddit.com/r/${cleanSub}/comments/${postId}/comment/${commentId}`
+      : `https://embed.reddit.com/r/${cleanSub}/comments/${postId}`;
+
+    const res = await axios.get(url, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+      timeout: 3000,
+      validateStatus: (status) => status === 200,
+    });
+
+    if (!res.data) return null;
+    const $ = cheerio.load(String(res.data));
+
+    // 1. Text body: Extract all markdown paragraphs
+    const ps: string[] = [];
+    $('.md p').each((_, el) => {
+      const t = $(el).text().trim();
+      if (t) ps.push(t);
+    });
+    const rawText = ps.length > 0 ? ps.join('\n\n') : $('.md').text().trim();
+    const description = rawText ? cleanDescription(rawText) : null;
+
+    // 2. Author
+    let embedAuthor: string | null = null;
+    const authorEl = $('a[href*="/user/"], .author').first();
+    if (authorEl.length > 0) {
+      const rawA = authorEl.text().trim().replace(/^u\//i, '');
+      if (rawA && !rawA.includes('[deleted]') && !rawA.includes('[removed]')) {
+        embedAuthor = `u/${rawA}`;
+      }
+    }
+
+    // 3. Subreddit Icon
+    let subIcon =
+      $('img[src*="communityIcon"], faceplate-img[src*="communityIcon"], img[src*="styles.redditmedia.com"]')
+        .first()
+        .attr('src') || null;
+    if (subIcon) {
+      subIcon = unescapeHtml(subIcon).replace(/&amp;/g, '&');
+    }
+
+    // 4. Metrics & created_timestamp from faceplate-tracker
+    let upvotes: number | null = null;
+    let comments: number | null = null;
+    let createdAt: string | null = null;
+
+    $('faceplate-tracker').each((_, el) => {
+      const raw = $(el).attr('data-faceplate-tracking-context');
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          if (parsed.post?.created_timestamp && !createdAt) {
+            createdAt = new Date(parsed.post.created_timestamp).toISOString();
+          }
+        } catch {}
+      }
+    });
+
+    const upNumber = $('faceplate-number').first().attr('number');
+    if (upNumber) {
+      const pNum = parseInt(upNumber, 10);
+      if (!isNaN(pNum) && pNum > 0) upvotes = pNum;
+    }
+    if (upvotes === null) {
+      const upMatch = $('a[data-testid="upvote"]').text().match(/([\d,.]+[KMBkmb]?)\s*upvotes?/i);
+      if (upMatch) {
+        upvotes = parseFormattedNumber(upMatch[1]);
+      }
+    }
+
+    const ctaMatch = $('a[data-testid="cta"], a[data-testid="comments"]').text().match(/(?:View\s*)?([\d,.]+[KMBkmb]?)\s*comments?/i);
+    if (ctaMatch) {
+      comments = parseFormattedNumber(ctaMatch[1]);
+    }
+
+    return {
+      description,
+      author: embedAuthor,
+      subredditIcon: subIcon,
+      upvotes,
+      comments,
+      createdAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// -------------------------------------------------------------
 // Reddit Extractor with Multi-Tier Architecture
 // -------------------------------------------------------------
 export const redditExtractor: PlatformExtractor<RedditCardData> = {
@@ -473,9 +587,42 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
     }
 
     // -----------------------------------------------------------
-    // Tier 3: PullPush Open API (if postId exists and data is missing or truncated)
+    // Tier 2.5: Official Reddit Embed Parser (embed.reddit.com, fast HTML <800ms)
     // -----------------------------------------------------------
     let isTruncatedDescription = isTruncatedText(description);
+    if (postId && subredditName && (!description || isTruncatedDescription || !author || author.includes('_user') || (!upvotes && !comments) || !subredditIcon || subredditIcon.includes('ui-avatars'))) {
+      const embedResult = await tryEmbedReddit(subredditName, postId, commentId);
+      if (embedResult) {
+        if (embedResult.description) {
+          if (!description || isTruncatedDescription || embedResult.description.length > description.length) {
+            description = embedResult.description;
+            isTruncatedDescription = isTruncatedText(description);
+          }
+        }
+        if (embedResult.author && (!author || author.includes('_user'))) {
+          author = embedResult.author;
+        }
+        if (embedResult.subredditIcon && (!subredditIcon || subredditIcon.includes('ui-avatars'))) {
+          subredditIcon = embedResult.subredditIcon;
+          const cleanSub = subredditName.replace(/^r\//i, '').trim();
+          if (cleanSub) avatarCache.set(`reddit_icon:${cleanSub.toLowerCase()}`, subredditIcon);
+        }
+        if (embedResult.upvotes && !upvotes) {
+          upvotes = embedResult.upvotes;
+        }
+        if (embedResult.comments && !comments) {
+          comments = embedResult.comments;
+        }
+        if (embedResult.createdAt && !postedAt) {
+          postedAt = embedResult.createdAt;
+        }
+      }
+    }
+
+    // -----------------------------------------------------------
+    // Tier 3: PullPush Open API (if postId exists and data is missing or truncated)
+    // -----------------------------------------------------------
+    isTruncatedDescription = isTruncatedText(description);
 
     if (postId) {
       if (!isCommentUrl) {
