@@ -2,7 +2,7 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { PlatformExtractor, ExtractionResult, RedditCardData, MediaItem, sanitizeMetrics } from './types';
 import { resolveUrl } from '../../utils/urlFormatter';
-import { cleanTitle, cleanDescription, unescapeHtml } from '../../utils/textCleaner';
+import { cleanTitle, cleanDescription, unescapeHtml, isTruncatedText } from '../../utils/textCleaner';
 import { parseFormattedNumber } from '../../utils/numberParser';
 import { playwrightEngine } from '../playwrightEngine';
 import { avatarCache } from '../../utils/cache';
@@ -175,7 +175,7 @@ export function addOrUpgradeImage(mediaList: MediaItem[], imgUrl: string | null 
 async function tryPullPushReddit(postId: string): Promise<ExtractionResult<RedditCardData> | null> {
   try {
     const res = await axios.get(`https://api.pullpush.io/reddit/search/submission/?ids=${postId}`, {
-      timeout: 2500,
+      timeout: 3500,
       headers: {
         'Accept': 'application/json',
         'User-Agent': 'mindspaceApp/1.0',
@@ -205,7 +205,7 @@ async function tryPullPushReddit(postId: string): Promise<ExtractionResult<Reddi
     const upvotes = post.score ?? post.ups ?? 0;
     const comments = post.num_comments ?? 0;
 
-    const mediaList: MediaItem[] = [];
+    let mediaList: MediaItem[] = [];
     const postUrl = post.url || post.url_overridden_by_dest || '';
 
     // Check direct image url
@@ -228,7 +228,7 @@ async function tryPullPushReddit(postId: string): Promise<ExtractionResult<Reddi
       });
     }
 
-    // Check preview image if no direct media link found
+    // Check preview image if no direct media link found and post is not a video
     if (mediaList.length === 0 && post.preview?.images?.[0]?.source?.url) {
       const previewUrl = post.preview.images[0].source.url.replace(/&amp;/g, '&');
       addOrUpgradeImage(mediaList, previewUrl);
@@ -247,6 +247,9 @@ async function tryPullPushReddit(postId: string): Promise<ExtractionResult<Reddi
     const iconUrl = getSubredditIcon(subredditName, post.sr_detail?.community_icon || post.sr_detail?.icon_img);
 
     const hasVideo = Boolean(post.is_video || postUrl.includes('v.redd.it') || mediaList.some((m) => m.type === 'video'));
+    if (hasVideo) {
+      mediaList = mediaList.filter((m) => m.type === 'video');
+    }
     const videoThumbnail = hasVideo
       ? post.preview?.images?.[0]?.source?.url?.replace(/&amp;/g, '&') ||
         (post.thumbnail && post.thumbnail.startsWith('http') && !post.thumbnail.includes('default') && !post.thumbnail.includes('nsfw') ? post.thumbnail : null) ||
@@ -272,6 +275,50 @@ async function tryPullPushReddit(postId: string): Promise<ExtractionResult<Reddi
         media: mediaList.length > 0 ? mediaList : null,
         video_thumbnail: videoThumbnail,
       },
+    };
+  } catch {
+    return null;
+  }
+}
+
+// -------------------------------------------------------------
+// Tier 1b: PullPush Open API for Reddit Comments (<500ms, Full Body)
+// -------------------------------------------------------------
+async function tryPullPushRedditComment(commentId: string): Promise<{
+  commentText: string;
+  commentAuthor: string;
+  commentScore: number;
+  commentCreatedAt: string;
+} | null> {
+  try {
+    const res = await axios.get(`https://api.pullpush.io/reddit/search/comment/?ids=${commentId}`, {
+      timeout: 3500,
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'mindspaceApp/1.0',
+      },
+      validateStatus: (status) => status === 200,
+    });
+
+    const comment = res.data?.data?.[0];
+    if (!comment || !comment.body) {
+      return null;
+    }
+
+    const commentText = cleanDescription(comment.body) || '';
+    const commentAuthor = comment.author && comment.author !== '[deleted]' && comment.author !== '[removed]'
+      ? (comment.author.startsWith('u/') ? comment.author : `u/${comment.author}`)
+      : 'u/reddit_user';
+    const commentScore = comment.score ?? comment.ups ?? 0;
+    const commentCreatedAt = comment.created_utc
+      ? new Date(comment.created_utc * 1000).toISOString()
+      : new Date().toISOString();
+
+    return {
+      commentText,
+      commentAuthor,
+      commentScore,
+      commentCreatedAt,
     };
   } catch {
     return null;
@@ -312,7 +359,8 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
         subredditIcon = cachedIcon;
       }
     }
-    const mediaList: MediaItem[] = [];
+    let mediaList: MediaItem[] = [];
+    let postedAt: string | null = null;
 
     const commentId = extractRedditCommentId(targetUrl) || extractRedditCommentId(canonicalUrl);
     const isCommentUrl = Boolean(commentId);
@@ -425,44 +473,78 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
     }
 
     // -----------------------------------------------------------
-    // Tier 3: PullPush Open API (if postId exists and data is missing)
+    // Tier 3: PullPush Open API (if postId exists and data is missing or truncated)
     // -----------------------------------------------------------
-    if (!isCommentUrl && postId && (!author || mediaList.length === 0)) {
-      const pullPushResult = await tryPullPushReddit(postId);
-      if (pullPushResult) {
-        if (!title) title = pullPushResult.title;
-        if (!author || author.includes('_user')) author = pullPushResult.card_data.author;
-        if (pullPushResult.description && !description) description = pullPushResult.description;
-        if (pullPushResult.card_data.metrics?.upvotes && !upvotes) upvotes = pullPushResult.card_data.metrics.upvotes;
-        if (pullPushResult.card_data.metrics?.comments && !comments) comments = pullPushResult.card_data.metrics.comments;
-        if (Array.isArray(pullPushResult.card_data.media) && pullPushResult.card_data.media.length > 0) {
-          pullPushResult.card_data.media.forEach((m) => {
-            if (m.type === 'image') {
-              addOrUpgradeImage(mediaList, m.url);
-            } else if (!mediaList.some((existing) => existing.url === m.url)) {
-              mediaList.push(m);
+    let isTruncatedDescription = isTruncatedText(description);
+
+    if (postId) {
+      if (!isCommentUrl) {
+        if (!author || author.includes('_user') || !description || isTruncatedDescription || (!upvotes && !comments) || mediaList.length === 0) {
+          const pullPushResult = await tryPullPushReddit(postId);
+          if (pullPushResult) {
+            if (!title || title === 'Reddit Post' || title === 'Reddit') title = pullPushResult.title;
+            if (!author || author.includes('_user')) author = pullPushResult.card_data.author;
+            if (pullPushResult.description) {
+              if (!description || isTruncatedDescription || pullPushResult.description.length > description.length) {
+                description = pullPushResult.description;
+                isTruncatedDescription = isTruncatedText(description);
+              }
             }
-          });
+            if (pullPushResult.card_data.metrics?.upvotes && !upvotes) upvotes = pullPushResult.card_data.metrics.upvotes;
+            if (pullPushResult.card_data.metrics?.comments && !comments) comments = pullPushResult.card_data.metrics.comments;
+            if (pullPushResult.card_data.posted_at && !postedAt) postedAt = pullPushResult.card_data.posted_at;
+            if (Array.isArray(pullPushResult.card_data.media) && pullPushResult.card_data.media.length > 0) {
+              pullPushResult.card_data.media.forEach((m) => {
+                if (m.type === 'image') {
+                  addOrUpgradeImage(mediaList, m.url);
+                } else if (!mediaList.some((existing) => existing.url === m.url)) {
+                  mediaList.push(m);
+                }
+              });
+            }
+            if (!snapshot && mediaList.length > 0) {
+              snapshot = mediaList[0].url;
+            }
+            if (pullPushResult.card_data.subreddit.icon_url && !pullPushResult.card_data.subreddit.icon_url.includes('ui-avatars')) {
+              subredditIcon = pullPushResult.card_data.subreddit.icon_url;
+            }
+          }
         }
-        if (!snapshot && mediaList.length > 0) {
-          snapshot = mediaList[0].url;
-        }
-        if (pullPushResult.card_data.subreddit.icon_url && !pullPushResult.card_data.subreddit.icon_url.includes('ui-avatars')) {
-          subredditIcon = pullPushResult.card_data.subreddit.icon_url;
+      } else if (commentId) {
+        if (!description || isTruncatedDescription || !author || author.includes('_user')) {
+          const commentResult = await tryPullPushRedditComment(commentId);
+          if (commentResult) {
+            if (commentResult.commentText) {
+              if (!description || isTruncatedDescription || commentResult.commentText.length > description.length) {
+                description = commentResult.commentText;
+                isTruncatedDescription = isTruncatedText(description);
+              }
+            }
+            if (commentResult.commentAuthor && (!author || author.includes('_user'))) {
+              author = commentResult.commentAuthor;
+            }
+            if (commentResult.commentScore && !upvotes) {
+              upvotes = commentResult.commentScore;
+            }
+            if (commentResult.commentCreatedAt && !postedAt) {
+              postedAt = commentResult.commentCreatedAt;
+            }
+          }
         }
       }
     }
 
-    let postedAt: string | null = null;
-
     // -----------------------------------------------------------
     // Tier 4: Playwright Hydration (shreddit-post, shreddit-comment, community icon)
     // -----------------------------------------------------------
+    isTruncatedDescription = isTruncatedText(description);
+
     const isMissingKeyData =
       isCommentUrl ||
       !author ||
       author.includes('_user') ||
       !description ||
+      isTruncatedDescription ||
       (!upvotes && !comments) ||
       !subredditIcon ||
       subredditIcon.includes('ui-avatars') ||
@@ -473,6 +555,7 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
         const pwResult = await playwrightEngine.scrape<any>(canonicalUrl, {
           waitSelector: isCommentUrl ? 'shreddit-comment, shreddit-post' : 'shreddit-post',
           waitTimeout: 5000,
+          timeout: 10000,
           customEvaluator: async (page) => {
             return await page.evaluate((cId) => {
               const sp = document.querySelector('shreddit-post');
@@ -556,10 +639,15 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
               const createdAt = sp.getAttribute('created-timestamp');
 
               // Description: Target specifically <shreddit-post-text-body slot="text-body">
-              const bodyCustomEl = sp.querySelector('shreddit-post-text-body[slot="text-body"], shreddit-post-text-body') || document.querySelector('shreddit-post-text-body');
+              const bodyCustomEl =
+                sp.querySelector('shreddit-post-text-body[slot="text-body"], shreddit-post-text-body') ||
+                document.querySelector('shreddit-post-text-body');
               let textBody = '';
               if (bodyCustomEl) {
-                const articleBody = bodyCustomEl.querySelector('[property="schema:articleBody"]');
+                const articleBody =
+                  bodyCustomEl.querySelector('[property="schema:articleBody"]') ||
+                  bodyCustomEl.querySelector('div[id*="-post-rtjson-content"]') ||
+                  bodyCustomEl.querySelector('[slot="text-body"]');
                 if (articleBody) {
                   const ps = Array.from(articleBody.querySelectorAll('p'));
                   if (ps.length > 0) {
@@ -574,7 +662,10 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
                 textBody = textBody.trim();
               }
               if (!textBody) {
-                const textEl = document.querySelector('[data-testid="post-content"] p, [slot="text-body"] p, shreddit-post p');
+                const textEl =
+                  document.querySelector('div[id*="-post-rtjson-content"]') ||
+                  document.querySelector('[data-testid="post-content"] p, [slot="text-body"] p, shreddit-post p') ||
+                  document.querySelector('div.text-neutral-content');
                 if (textEl) {
                   textBody = (textEl as HTMLElement).innerText || textEl.textContent || '';
                 }
@@ -641,12 +732,12 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
                 if (img.src) images.push(img.src);
               });
 
-              // 2. Targeted .media-lightbox-img containers (excluding background filter images)
-              const mediaLightboxContainers = Array.from(sp.querySelectorAll<HTMLElement>('div.media-lightbox-img, gallery-carousel li, [slot="post-media-container"]'));
+              // 2. Targeted .media-lightbox-img containers (excluding background filter and video player images)
+              const mediaLightboxContainers = Array.from(sp.querySelectorAll<HTMLElement>('div.media-lightbox-img, gallery-carousel li'));
               mediaLightboxContainers.forEach((container) => {
-                const primaryImgs = Array.from(container.querySelectorAll<HTMLImageElement>('img#post-image, img[data-post-media-primary], img.preview-img'));
+                const primaryImgs = Array.from(container.querySelectorAll<HTMLImageElement>('img#post-image, img[data-post-media-primary]'));
                 primaryImgs.forEach((img) => {
-                  if (img.src && !img.classList.contains('post-background-image-filter')) {
+                  if (img.src && !img.classList.contains('post-background-image-filter') && !img.closest('shreddit-player')) {
                     images.push(img.src);
                   }
                 });
@@ -655,16 +746,16 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
               // 3. Carousel slides
               const carouselImgs = Array.from(sp.querySelectorAll<HTMLImageElement>('gallery-carousel figure img, gallery-carousel ul li img'));
               carouselImgs.forEach((img) => {
-                if (img.src && !img.classList.contains('post-background-image-filter')) {
+                if (img.src && !img.classList.contains('post-background-image-filter') && !img.closest('shreddit-player')) {
                   images.push(img.src);
                 }
               });
 
-              // 4. Fallback if no images found yet
-              if (images.length === 0) {
+              // 4. Fallback if no images found yet and post does not contain a video
+              if (images.length === 0 && !videoUrl && !player) {
                 const fallbackImgs = Array.from(sp.querySelectorAll<HTMLImageElement>('shreddit-aspect-ratio img, [slot="post-media-container"] img'));
                 fallbackImgs.forEach((img) => {
-                  if (img.src && !img.classList.contains('post-background-image-filter')) {
+                  if (img.src && !img.closest('shreddit-player') && !img.classList.contains('post-background-image-filter')) {
                     images.push(img.src);
                   }
                 });
@@ -702,7 +793,11 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
               author = `u/${c.commentAuthor}`;
             }
             if (c.commentText) {
-              description = cleanDescription(c.commentText);
+              const cleanCText = cleanDescription(c.commentText);
+              if (cleanCText && (!description || isTruncatedDescription || cleanCText.length > description.length)) {
+                description = cleanCText;
+                isTruncatedDescription = isTruncatedText(description);
+              }
             }
             if (c.commentScore !== undefined && c.commentScore !== null && c.commentScore !== '') {
               const parsedScore = parseInt(c.commentScore, 10);
@@ -720,7 +815,7 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
                 snapshot = mediaList[0].url;
               }
             }
-          } else {
+          } else if (!isCommentUrl) {
             if (c.postTitle && (!title || title === 'Reddit Post' || title === 'Reddit' || title.includes('community on Reddit'))) {
               title = cleanTitle(cleanRedditTitle(c.postTitle));
             }
@@ -745,7 +840,10 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
                 cleanBody.toLowerCase() !== (c.postAuthor || '').toLowerCase() &&
                 !cleanBody.startsWith('r/')
               ) {
-                description = cleanBody;
+                if (!description || isTruncatedDescription || cleanBody.length > description.length) {
+                  description = cleanBody;
+                  isTruncatedDescription = isTruncatedText(description);
+                }
               }
             }
 
@@ -756,7 +854,8 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
               if (c.videoPoster) snapshot = c.videoPoster;
             }
 
-            if (Array.isArray(c.images)) {
+            // Only add images to mediaList if this is not a video post
+            if (Array.isArray(c.images) && !c.videoUrl && !mediaList.some((m) => m.type === 'video')) {
               c.images.forEach((img: string) => {
                 addOrUpgradeImage(mediaList, img);
               });
@@ -800,6 +899,11 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
     }
 
     const hasVideo = mediaList.some((m) => m.type === 'video');
+    if (hasVideo) {
+      // For video posts, mediaList must contain only the video item.
+      // The video thumbnail is stored strictly in card_data.video_thumbnail (and snapshot).
+      mediaList = mediaList.filter((m) => m.type === 'video');
+    }
     const videoThumbnail = hasVideo ? (snapshot || null) : null;
 
     return {

@@ -312,7 +312,27 @@ export function isDegradedExtractionResult(platform: string | null | undefined, 
     }
   }
 
+  if (p === 'reddit') {
+    if (description && isTruncatedText(description)) {
+      return true;
+    }
+  }
+
   return false;
+}
+
+/**
+ * Detects if a text snippet is truncated with an ellipsis or cut off prematurely (e.g. social crawler metadata).
+ */
+export function isTruncatedText(text: string | null | undefined): boolean {
+  if (!text) return false;
+  const trimmed = text.trim();
+  return (
+    trimmed.endsWith('…') ||
+    trimmed.endsWith('&#8230;') ||
+    trimmed.endsWith('&hellip;') ||
+    (trimmed.length <= 250 && (trimmed.endsWith('...') || /\.\.\.\s*$/.test(trimmed)))
+  );
 }
 
 
