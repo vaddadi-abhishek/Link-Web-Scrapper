@@ -50,6 +50,7 @@ const rawAllowedOrigins = [
   'http://127.0.0.1:3000',
   'https://usemindspace.vercel.app',
   'https://mindspace.vercel.app',
+  'https://link-web-scrapper.onrender.com',
   'https://mindspace-link-web-scrapper.onrender.com',
   'https://mindspace-node-backend.onrender.com',
 ];
