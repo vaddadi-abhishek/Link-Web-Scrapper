@@ -541,8 +541,8 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
 
     const isMissingKeyData =
       isCommentUrl
-        ? (!description || !author || author.includes('_user'))
-        : (!title || !author || author.includes('_user') || (isTruncatedDescription && (!description || description.length < 50)));
+        ? (!description || isTruncatedDescription || !author || author.includes('_user'))
+        : (!title || !author || author.includes('_user') || isTruncatedDescription || (!description && mediaList.length === 0));
 
     if (isMissingKeyData) {
       try {
@@ -651,17 +651,29 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
                   }
                 } else {
                   const fallbackEl = bodyCustomEl.querySelector('[data-post-click-location="text-body"], [slot="text-body"]') || bodyCustomEl;
-                  textBody = (fallbackEl as HTMLElement).innerText || fallbackEl.textContent || '';
+                  const ps = Array.from(fallbackEl.querySelectorAll('p'));
+                  if (ps.length > 0) {
+                    textBody = ps.map((p: any) => (p.innerText || p.textContent || '').trim()).filter(Boolean).join('\n\n');
+                  } else {
+                    textBody = (fallbackEl as HTMLElement).innerText || fallbackEl.textContent || '';
+                  }
                 }
                 textBody = textBody.trim();
               }
               if (!textBody) {
-                const textEl =
+                const containerEl =
                   document.querySelector('div[id*="-post-rtjson-content"]') ||
-                  document.querySelector('[data-testid="post-content"] p, [slot="text-body"] p, shreddit-post p') ||
+                  document.querySelector('[data-testid="post-content"]') ||
+                  sp?.querySelector('[slot="text-body"]') ||
+                  document.querySelector('shreddit-post [slot="text-body"]') ||
                   document.querySelector('div.text-neutral-content');
-                if (textEl) {
-                  textBody = (textEl as HTMLElement).innerText || textEl.textContent || '';
+                if (containerEl) {
+                  const ps = Array.from(containerEl.querySelectorAll('p'));
+                  if (ps.length > 0) {
+                    textBody = ps.map((p: any) => (p.innerText || p.textContent || '').trim()).filter(Boolean).join('\n\n');
+                  } else {
+                    textBody = (containerEl as HTMLElement).innerText || containerEl.textContent || '';
+                  }
                 }
               }
 

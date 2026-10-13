@@ -41,8 +41,9 @@ export function unescapeHtml(text: string): string {
     .replace(/\\+([^a-zA-Z0-9\s])/g, '$1');
 }
 
-// Remove social engagement metrics header from descriptions (Instagram, Facebook, LinkedIn, Twitter)
+// Remove social engagement metrics header from descriptions (Instagram, Facebook, LinkedIn, Twitter, Reddit)
 // e.g. "654K likes, 4,503 comments - srividyakotnala on July 14, 2025: \"This song...\""
+// e.g. "99 votes, 17 comments. Naa job hunt lo..."
 export function stripEngagementHeader(text: string): string {
   if (!text) return '';
 
@@ -55,7 +56,18 @@ export function stripEngagementHeader(text: string): string {
     ''
   );
 
-  // Pattern 2: "username on Platform (Date): " or "username on Date: "
+  // Pattern 2: Reddit style engagement metrics prefix
+  // "99 votes, 17 comments. " or "1.2K upvotes, 45 comments. " or "99 votes. "
+  cleaned = cleaned.replace(
+    /^[\d,.\sKMBkmb]+(?:votes?|upvotes?)(?:,\s*[\d,.\sKMBkmb]+comments?)?[\.\-–—:]\s*"?/i,
+    ''
+  );
+  cleaned = cleaned.replace(
+    /^[\d,.\sKMBkmb]+comments?[\.\-–—:]\s*"?/i,
+    ''
+  );
+
+  // Pattern 3: "username on Platform (Date): " or "username on Date: "
   cleaned = cleaned.replace(/^[a-zA-Z0-9._-]+\s+on\s+[a-zA-Z0-9\s,.:]+:\s*"?/i, '');
 
   return cleaned.trim();
