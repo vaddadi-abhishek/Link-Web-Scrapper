@@ -142,15 +142,30 @@ export function isValidRedditPostImage(url: string | null | undefined): boolean 
   return isRedditImageHost || hasImageExtension;
 }
 
+export function normalizeRedditImageUrl(url: string | null | undefined): string | null {
+  if (!url || typeof url !== 'string') return null;
+  const unescaped = unescapeHtml(url).replace(/&amp;/g, '&');
+  const cleanUrl = unescaped.split(/[?#]/)[0];
+  const match = cleanUrl.match(/(?:^|https?:\/\/|\/\/)(?:i\.redd\.it\/|(?:cf\.)?preview\.redd\.it\/(?:[^\/]+-)?(?:v\d+-)?)([a-zA-Z0-9]{8,})(?:\.([a-zA-Z0-9]+))?/i);
+  if (match && match[1]) {
+    const mediaId = match[1];
+    const ext = match[2] || 'jpg';
+    return `https://i.redd.it/${mediaId}.${ext}`;
+  }
+  return unescaped;
+}
+
 export function extractRedditMediaId(url: string | null | undefined): string | null {
   if (!url) return null;
-  const match = url.match(/(?:i\.redd\.it\/|preview\.redd\.it\/(?:[^\/]+-)?(?:v\d+-)?)([a-zA-Z0-9]{8,})/i);
+  const match = url.match(/(?:^|https?:\/\/|\/\/)(?:i\.redd\.it\/|(?:cf\.)?preview\.redd\.it\/(?:[^\/]+-)?(?:v\d+-)?)([a-zA-Z0-9]{8,})/i);
   return match ? match[1] : null;
 }
 
 export function addOrUpgradeImage(mediaList: MediaItem[], imgUrl: string | null | undefined): void {
-  if (!imgUrl || !isValidRedditPostImage(imgUrl)) return;
-  const mediaId = extractRedditMediaId(imgUrl);
+  if (!imgUrl) return;
+  const normalizedUrl = normalizeRedditImageUrl(imgUrl);
+  if (!normalizedUrl || !isValidRedditPostImage(normalizedUrl)) return;
+  const mediaId = extractRedditMediaId(normalizedUrl);
   if (mediaId) {
     const existingIndex = mediaList.findIndex((m) => {
       const existingId = extractRedditMediaId(m.url);
@@ -158,15 +173,15 @@ export function addOrUpgradeImage(mediaList: MediaItem[], imgUrl: string | null 
     });
 
     if (existingIndex !== -1) {
-      if (imgUrl.includes('i.redd.it') && !mediaList[existingIndex].url.includes('i.redd.it')) {
-        mediaList[existingIndex].url = imgUrl;
+      if (normalizedUrl.includes('i.redd.it') && !mediaList[existingIndex].url.includes('i.redd.it')) {
+        mediaList[existingIndex].url = normalizedUrl;
       }
       return;
     }
   } else {
-    if (mediaList.some((m) => m.url === imgUrl)) return;
+    if (mediaList.some((m) => m.url === normalizedUrl)) return;
   }
-  mediaList.push({ type: 'image', url: imgUrl });
+  mediaList.push({ type: 'image', url: normalizedUrl });
 }
 
 // -------------------------------------------------------------
@@ -348,6 +363,9 @@ interface EmbedRedditResult {
   upvotes: number | null;
   comments: number | null;
   createdAt: string | null;
+  postType: string | null;
+  mediaList: MediaItem[];
+  videoThumbnail: string | null;
 }
 
 async function tryEmbedReddit(
@@ -397,7 +415,7 @@ async function tryEmbedReddit(
 
     // 3. Subreddit Icon
     let subIcon =
-      $('img[src*="communityIcon"], faceplate-img[src*="communityIcon"], img[src*="styles.redditmedia.com"]')
+      $('img[src*="communityIcon"], faceplate-img[src*="communityIcon"], img[src*="styles.redditmedia.com"], img[alt="subreddit icon"]')
         .first()
         .attr('src') || null;
     if (subIcon) {
@@ -408,6 +426,7 @@ async function tryEmbedReddit(
     let upvotes: number | null = null;
     let comments: number | null = null;
     let createdAt: string | null = null;
+    let postType: string | null = null;
 
     $('faceplate-tracker').each((_, el) => {
       const raw = $(el).attr('data-faceplate-tracking-context');
@@ -416,6 +435,9 @@ async function tryEmbedReddit(
           const parsed = JSON.parse(raw);
           if (parsed.post?.created_timestamp && !createdAt) {
             createdAt = new Date(parsed.post.created_timestamp).toISOString();
+          }
+          if (parsed.post?.type && !postType) {
+            postType = parsed.post.type;
           }
         } catch {}
       }
@@ -438,6 +460,86 @@ async function tryEmbedReddit(
       comments = parseFormattedNumber(ctaMatch[1]);
     }
 
+    // 5. Media extraction: Video, Gallery, and Single Image
+    const mediaList: MediaItem[] = [];
+    let videoThumbnail: string | null = null;
+
+    // 5a. Check video player (<shreddit-player>)
+    const player = $('shreddit-player');
+    if (player.length > 0) {
+      let videoUrl: string | null = null;
+      const packagedJsonStr = player.attr('packaged-media-json');
+      if (packagedJsonStr) {
+        try {
+          const parsed = JSON.parse(packagedJsonStr);
+          const permutations = parsed?.playbackMp4s?.permutations;
+          if (Array.isArray(permutations) && permutations.length > 0) {
+            const sorted = [...permutations].sort((a, b) => {
+              const hA = a?.source?.dimensions?.height || 0;
+              const hB = b?.source?.dimensions?.height || 0;
+              return hB - hA;
+            });
+            if (sorted[0]?.source?.url) {
+              videoUrl = sorted[0].source.url;
+            }
+          }
+        } catch {}
+      }
+
+      if (!videoUrl) {
+        videoUrl = player.attr('src') || player.find('source').attr('src') || player.attr('preview') || null;
+      }
+
+      const posterAttr = player.attr('poster');
+      const previewAttr = player.attr('preview');
+      const imgPoster = player.find('img').attr('src');
+
+      if (posterAttr && !posterAttr.includes('.mp4') && !posterAttr.includes('.m3u8')) {
+        videoThumbnail = unescapeHtml(posterAttr).replace(/&amp;/g, '&');
+      } else if (imgPoster) {
+        videoThumbnail = unescapeHtml(imgPoster).replace(/&amp;/g, '&');
+      } else if (previewAttr && !previewAttr.includes('.mp4') && !previewAttr.includes('.m3u8')) {
+        videoThumbnail = unescapeHtml(previewAttr).replace(/&amp;/g, '&');
+      }
+
+      if (videoUrl) {
+        mediaList.push({ type: 'video', url: videoUrl });
+      }
+    }
+
+    // 5b. Check gallery-carousel (<gallery-carousel>)
+    if (mediaList.length === 0) {
+      $('gallery-carousel li, ul[slot="carousel-items"] li').each((_, el) => {
+        const img = $(el).find('img:not(.post-background-image-filter):not([slot="presentation"])').first();
+        const src = img.attr('src');
+        if (src) {
+          addOrUpgradeImage(mediaList, src);
+        }
+      });
+    }
+
+    // 5c. Check single images / aspect ratio images
+    if (mediaList.length === 0) {
+      $('shreddit-aspect-ratio img, [data-post-click-location="image"] img, img.object-contain, a[href*="preview.redd.it"] img, a[href*="i.redd.it"] img').each((_, el) => {
+        if ($(el).hasClass('post-background-image-filter') || $(el).closest('shreddit-player').length) return;
+        const src = $(el).attr('src');
+        if (src && !src.includes('communityIcon') && !src.includes('avatar') && !src.includes('rlcdn.com')) {
+          addOrUpgradeImage(mediaList, src);
+        }
+      });
+    }
+
+    // 5d. Comment images (if commentId was requested)
+    if (commentId && mediaList.length === 0) {
+      $('img[src*="preview.redd.it"], img[src*="i.redd.it"]').each((_, el) => {
+        if ($(el).hasClass('post-background-image-filter') || $(el).closest('shreddit-player').length) return;
+        const src = $(el).attr('src');
+        if (src && !src.includes('communityIcon') && !src.includes('avatar') && !src.includes('rlcdn.com')) {
+          addOrUpgradeImage(mediaList, src);
+        }
+      });
+    }
+
     return {
       description,
       author: embedAuthor,
@@ -445,6 +547,9 @@ async function tryEmbedReddit(
       upvotes,
       comments,
       createdAt,
+      postType,
+      mediaList,
+      videoThumbnail,
     };
   } catch {
     return null;
@@ -590,9 +695,23 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
     // Tier 2.5: Official Reddit Embed Parser (embed.reddit.com, fast HTML <800ms)
     // -----------------------------------------------------------
     let isTruncatedDescription = isTruncatedText(description);
-    if (postId && subredditName && (!description || isTruncatedDescription || !author || author.includes('_user') || (!upvotes && !comments) || !subredditIcon || subredditIcon.includes('ui-avatars'))) {
+    let embedPostType: string | null = null;
+    const shouldTryEmbed =
+      !description ||
+      isTruncatedDescription ||
+      !author ||
+      author.includes('_user') ||
+      (!upvotes && !comments) ||
+      !subredditIcon ||
+      subredditIcon.includes('ui-avatars') ||
+      (!isCommentUrl && mediaList.length === 0);
+
+    if (postId && subredditName && shouldTryEmbed) {
       const embedResult = await tryEmbedReddit(subredditName, postId, commentId);
       if (embedResult) {
+        if (embedResult.postType) {
+          embedPostType = embedResult.postType;
+        }
         if (embedResult.description) {
           if (!description || isTruncatedDescription || embedResult.description.length > description.length) {
             description = embedResult.description;
@@ -615,6 +734,23 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
         }
         if (embedResult.createdAt && !postedAt) {
           postedAt = embedResult.createdAt;
+        }
+        if (embedResult.mediaList && embedResult.mediaList.length > 0) {
+          embedResult.mediaList.forEach((m) => {
+            if (m.type === 'video') {
+              if (!mediaList.some((existing) => existing.type === 'video')) {
+                mediaList.unshift(m);
+              }
+            } else {
+              addOrUpgradeImage(mediaList, m.url);
+            }
+          });
+        }
+        if (embedResult.videoThumbnail && !snapshot) {
+          snapshot = embedResult.videoThumbnail;
+        }
+        if (!snapshot && mediaList.length > 0 && mediaList[0].type === 'image') {
+          snapshot = mediaList[0].url;
         }
       }
     }
@@ -686,10 +822,18 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
     // -----------------------------------------------------------
     isTruncatedDescription = isTruncatedText(description);
 
+    const isMediaExpected =
+      embedPostType === 'gallery' ||
+      embedPostType === 'image' ||
+      embedPostType === 'video' ||
+      canonicalUrl.includes('/gallery/') ||
+      canonicalUrl.includes('i.redd.it') ||
+      canonicalUrl.includes('v.redd.it');
+
     const isMissingKeyData =
       isCommentUrl
         ? (!description || isTruncatedDescription || !author || author.includes('_user'))
-        : (!title || !author || author.includes('_user') || isTruncatedDescription || (!description && mediaList.length === 0));
+        : (!title || !author || author.includes('_user') || isTruncatedDescription || (!description && mediaList.length === 0) || (isMediaExpected && mediaList.length === 0));
 
     if (isMissingKeyData) {
       try {
@@ -1049,6 +1193,10 @@ export const redditExtractor: PlatformExtractor<RedditCardData> = {
       if (!mediaList.some((m) => m.type === 'video') && mediaList.length === 0) {
         addOrUpgradeImage(mediaList, snapshot);
       }
+    }
+
+    if (!snapshot && mediaList.length > 0 && mediaList[0].type === 'image') {
+      snapshot = mediaList[0].url;
     }
 
     const hasVideo = mediaList.some((m) => m.type === 'video');
