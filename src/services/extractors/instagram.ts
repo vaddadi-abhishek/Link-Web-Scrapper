@@ -891,8 +891,9 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
       mediaList[0]?.url ||
       null;
 
+    const isReel = !isProfile && (/\/(?:reel|reels)\//i.test(targetUrl) || (title ? /Instagram\s+reel/i.test(title) : false));
     const hasVideo = mediaList.some((m) => m.type === 'video');
-    const videoThumbnail = hasVideo ? finalSnapshot : null;
+    const videoThumbnail = (hasVideo || isReel) ? finalSnapshot : null;
 
     const card_data: InstagramCardData = {
       author: {
@@ -954,20 +955,27 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
             pwMedia = [{ type: 'image', url: pwData.snapshot }];
           }
           const pwHasVideo = pwMedia.some((m) => m.type === 'video');
+          const isPwRestricted =
+            Boolean((username === 'unknown' || !username) &&
+            (!pwMedia || pwMedia.length === 0) &&
+            (!pwData.description || /unavailable/i.test(pwData.title || '')));
+
           return {
             title:
-              pwData.title ||
-              (isProfile && username !== 'unknown'
-                ? displayName && displayName !== 'Instagram User'
-                  ? `${displayName} (@${username})`
-                  : `@${username} on Instagram`
-                : 'Instagram Post'),
-            description: pwData.description || '',
+              isPwRestricted
+                ? 'Restricted Instagram Content'
+                : pwData.title ||
+                  (isProfile && username !== 'unknown'
+                    ? displayName && displayName !== 'Instagram User'
+                      ? `${displayName} (@${username})`
+                      : `@${username} on Instagram`
+                    : 'Instagram Post'),
+            description: isPwRestricted ? 'The account is restricted, please view it on Instagram.' : (pwData.description || ''),
             logo: pwData.logo || logo,
             ogSiteName,
             card_data: {
               author: {
-                username,
+                username: isPwRestricted ? 'instagram' : username,
                 name: pwData.author || displayName,
                 avatar_url: cheerioData?.authorAvatar || embedAvatar || null,
                 verified: isVerified,
@@ -975,8 +983,10 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
               metrics: sanitizeMetrics(metrics),
               media: pwMedia && pwMedia.length > 0 ? pwMedia : null,
               posted_at: pwData.publishedAt || publishedAt || new Date().toISOString(),
-              video_thumbnail: pwHasVideo ? (pwData.snapshot || finalSnapshot) : null,
+              video_thumbnail: (pwHasVideo || isReel) ? (pwData.snapshot || finalSnapshot) : null,
               is_profile: isProfile,
+              is_restricted: isPwRestricted || undefined,
+              restriction_reason: isPwRestricted ? 'The account is restricted, please view it on Instagram.' : undefined,
             },
           };
         }
@@ -985,17 +995,32 @@ export const instagramExtractor: PlatformExtractor<InstagramCardData> = {
       }
     }
 
+    const isRestricted =
+      Boolean((username === 'unknown' || !username) &&
+      (!card_data.media || card_data.media.length === 0) &&
+      (!description || description.trim() === '' || /restricted|unavailable/i.test(description)));
+
+    if (isRestricted) {
+      card_data.is_restricted = true;
+      card_data.restriction_reason = 'The account is restricted, please view it on Instagram.';
+      if (!description || description.trim() === '') {
+        description = 'The account is restricted, please view it on Instagram.';
+      }
+    }
+
     return {
       title:
-        title && title !== 'Instagram Post' && title !== 'Instagram'
-          ? title
-          : isProfile && username !== 'unknown'
-            ? displayName && displayName !== 'Instagram User'
-              ? `${displayName} (@${username})`
-              : `@${username} on Instagram`
-            : username !== 'unknown'
-              ? `Post by @${username} on Instagram`
-              : 'Instagram Post',
+        isRestricted
+          ? 'Restricted Instagram Content'
+          : title && title !== 'Instagram Post' && title !== 'Instagram'
+            ? title
+            : isProfile && username !== 'unknown'
+              ? displayName && displayName !== 'Instagram User'
+                ? `${displayName} (@${username})`
+                : `@${username} on Instagram`
+              : username !== 'unknown'
+                ? `Post by @${username} on Instagram`
+                : 'Instagram Post',
       description: description || '',
       logo,
       ogSiteName,

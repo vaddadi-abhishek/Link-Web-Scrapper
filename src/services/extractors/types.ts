@@ -50,6 +50,8 @@ export interface InstagramCardData {
   posted_at: string;
   video_thumbnail?: string | null;
   is_profile?: boolean;
+  is_restricted?: boolean;
+  restriction_reason?: string | null;
 }
 
 export interface FacebookCardData {
